@@ -1,0 +1,21 @@
+[package]
+name = "rust_python_file"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+name="rust_python_file"
+
+[dependencies]
+rust_serial_file={path = "../rust_serial_file"}
+serialized_struct_derive={path = "../serialized_struct_derive"}
+pyo3 = { version = "0.28", features = ["extension-module"] }
+pyo3-stub-gen = "0.22.2"
+
+[dev-dependencies]
+tempfile = "3.23.0"
+anyhow = "1.0.104"
+
+[[bin]]
+name = "stub_gen"
