@@ -3,7 +3,11 @@ use std::{
     ops::{Deref, DerefMut},
 };
 
-use crate::{file::position::Position, serialized_struct::SerializedStruct};
+use crate::{
+    file::position::{Position, binary_look_up_file_struct},
+    serialized_struct::SerializedStruct,
+    utils::binary_search::{SearchIndex, SearchQuery},
+};
 
 use super::{BufferedReader, BufferedWriter, FileNeededTrait, FileReference};
 
@@ -27,6 +31,84 @@ impl<S: SerializedStruct, F: FileNeededTrait> StructFile<S, F> {
     }
     pub fn reader(&self, row_count: usize) -> StructBufferedReader<S, F> {
         StructBufferedReader::wrap(self, row_count)
+    }
+
+    pub fn find_by_key<K>(&mut self, key: &K) -> SearchIndex
+    where
+        S: PartialOrd<K>,
+    {
+        let mut reader = self.reader(100);
+        reader.find_by_key(key)
+    }
+
+    pub fn find_by_element(&mut self, element: &S) -> SearchIndex
+    where
+        S: PartialOrd<S>,
+    {
+        let mut reader = self.reader(100);
+        reader.find_by_element(element)
+    }
+
+    pub fn append(&mut self, element: &S) -> anyhow::Result<()> {
+        let mut writer = self.writer(1);
+        writer.seek(self.row_count())?;
+        writer.write_value(element)
+    }
+
+    pub fn write_value_at(&mut self, element: &S, index: usize) -> anyhow::Result<()> {
+        let mut writer = self.writer(1);
+        writer.write_value_at(index, element)
+    }
+
+    fn insert_element_at(&mut self, element: &S, index: usize) -> anyhow::Result<()> {
+        let buffer_size = 100;
+        let mut over_index = self.row_count();
+
+        let mut end_index = self.row_count();
+
+        over_index = if over_index > buffer_size {
+            over_index - buffer_size
+        } else {
+            0
+        };
+
+        if over_index < index {
+            over_index = index;
+        }
+
+        while over_index >= index {
+            let mut temp_array: Vec<u8> = Vec::with_capacity(buffer_size * self.size_of_a_row);
+            let mut reader = self.reader(buffer_size);
+            for i in over_index..end_index {
+                temp_array.extend(reader.read_at(i)?);
+            }
+            let mut writer = self.writer(buffer_size);
+            writer.write_at(over_index + 1, temp_array.as_slice())?;
+
+            if over_index == index {
+                break;
+            }
+            end_index = over_index;
+            over_index -= buffer_size;
+            if over_index < index {
+                over_index = index;
+            }
+        }
+
+        self.write_value_at(element, index)
+    }
+
+    pub fn insert(&mut self, element: &S) -> anyhow::Result<()>
+    where
+        S: PartialOrd<S>,
+    {
+        let existing_element = self.find_by_element(element);
+        match existing_element {
+            SearchIndex::None => self.append(element),
+            SearchIndex::Before(i) => self.insert_element_at(element, i + 1),
+            SearchIndex::Exact(i) => self.write_value_at(element, i),
+            SearchIndex::After(i) => self.insert_element_at(element, i),
+        }
     }
 }
 
@@ -73,6 +155,20 @@ impl<S: SerializedStruct, T: FileNeededTrait> StructBufferedReader<S, T> {
         } else {
             self.read_value_at(idx).ok()
         }
+    }
+
+    pub fn find_by_key<K>(&mut self, key: &K) -> SearchIndex
+    where
+        S: PartialOrd<K> + PartialEq<K>,
+    {
+        binary_look_up_file_struct(self, key, SearchQuery::Any)
+    }
+
+    pub fn find_by_element(&mut self, element: &S) -> SearchIndex
+    where
+        S: PartialOrd<S>,
+    {
+        binary_look_up_file_struct(self, element, SearchQuery::Any)
     }
 }
 
@@ -251,7 +347,7 @@ mod test {
 
     use super::StructFile;
 
-    #[derive(Debug, Clone, Copy, PartialEq, SerializedStruct)]
+    #[derive(Debug, Clone, Copy, PartialEq, PartialOrd, SerializedStruct)]
     struct TestStruct {
         time: u64,
         value: f32,
@@ -332,6 +428,229 @@ mod test {
 
             println!("{expected_2:?} -> {result:?}");
             assert_eq!(expected_2, result);
+        }
+
+        Ok(())
+    }
+
+    fn struct_create(time: u64) -> TestStruct {
+        TestStruct {
+            time: time,
+            value: time as f32 / 10.0,
+        }
+    }
+
+    #[test]
+    fn test_struct_file_insert_middle() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir().unwrap();
+
+        let file_path = dir.path().join("temp_file_buffer_reader.temp");
+
+        let mut values_to_write = Vec::new();
+        for i in 0..400 {
+            values_to_write.push(struct_create((i + 1) * 10));
+        }
+
+        let file_ref = FileReference::free_from_path(file_path, 0, 0, false)?;
+        let mut file_ref = StructFile::wrap(file_ref);
+
+        {
+            let mut write_file: super::StructBufferedWriter<
+                TestStruct,
+                std::sync::Arc<std::fs::File>,
+            > = file_ref.writer(100);
+            //create a temp file
+            values_to_write
+                .iter()
+                .for_each(|v| write_file.write_value(&v).unwrap());
+        }
+
+        let element = TestStruct {
+            time: 2102,
+            value: 50.0,
+        };
+        file_ref.insert(&element)?;
+
+        assert_eq!(401, file_ref.row_count());
+
+        {
+            let mut reader = file_ref.reader(1);
+
+            let result = reader.read_value_at(0)?;
+            let expected = values_to_write[0];
+
+            println!("{expected:?} -> {result:?}");
+            assert_eq!(expected, result);
+
+            let result = reader.read_value_at(210)?;
+
+            println!("{element:?} -> {result:?}");
+            assert_eq!(element, result);
+
+            let result = reader.read_value_at(1)?;
+            let expected = values_to_write[1];
+
+            println!("{expected:?} -> {result:?}");
+            assert_eq!(expected, result);
+
+            let result = reader.read_value_at(209)?;
+            let expected = values_to_write[209];
+
+            println!("{expected:?} -> {result:?}");
+            assert_eq!(expected, result);
+
+            let result = reader.read_value_at(211)?;
+            let expected = values_to_write[210];
+
+            println!("{expected:?} -> {result:?}");
+            assert_eq!(expected, result);
+
+            let mut offset = 0;
+            for i in 0..reader.row_count() {
+                let result = reader.read_value_at(i)?;
+                if i == 210 {
+                    assert_eq!(element, result);
+                    offset = 1;
+                } else {
+                    assert_eq!(values_to_write[i - offset], result);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_struct_file_insert_beginning() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir().unwrap();
+
+        let file_path = dir.path().join("temp_file_buffer_reader.temp");
+
+        let mut values_to_write = Vec::new();
+        for i in 0..400 {
+            values_to_write.push(struct_create((i + 1) * 10));
+        }
+
+        let file_ref = FileReference::free_from_path(file_path, 0, 0, false)?;
+        let mut file_ref = StructFile::wrap(file_ref);
+
+        {
+            let mut write_file: super::StructBufferedWriter<
+                TestStruct,
+                std::sync::Arc<std::fs::File>,
+            > = file_ref.writer(100);
+            //create a temp file
+            values_to_write
+                .iter()
+                .for_each(|v| write_file.write_value(&v).unwrap());
+        }
+
+        let element = TestStruct {
+            time: 0,
+            value: 50.0,
+        };
+        file_ref.insert(&element)?;
+
+        assert_eq!(401, file_ref.row_count());
+
+        {
+            let mut reader = file_ref.reader(1);
+
+            let result = reader.read_value_at(0)?;
+            let expected = element;
+
+            println!("{expected:?} -> {result:?}");
+            assert_eq!(expected, result);
+
+            let result = reader.read_value_at(1)?;
+
+            let expected = values_to_write[0];
+            println!("{expected:?} -> {result:?}");
+            assert_eq!(expected, result);
+
+            let result = reader.read_value_at(2)?;
+            let expected = values_to_write[1];
+
+            println!("{expected:?} -> {result:?}");
+            assert_eq!(expected, result);
+
+            let mut offset = 0;
+            for i in 0..reader.row_count() {
+                let result = reader.read_value_at(i)?;
+                if i == 0 {
+                    assert_eq!(element, result);
+                    offset = 1;
+                } else {
+                    assert_eq!(values_to_write[i - offset], result);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_struct_file_insert_end() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir().unwrap();
+
+        let file_path = dir.path().join("temp_file_buffer_reader.temp");
+
+        let mut values_to_write = Vec::new();
+        for i in 0..400 {
+            values_to_write.push(struct_create((i + 1) * 10));
+        }
+
+        let file_ref = FileReference::free_from_path(file_path, 0, 0, false)?;
+        let mut file_ref = StructFile::wrap(file_ref);
+
+        {
+            let mut write_file: super::StructBufferedWriter<
+                TestStruct,
+                std::sync::Arc<std::fs::File>,
+            > = file_ref.writer(100);
+            //create a temp file
+            values_to_write
+                .iter()
+                .for_each(|v| write_file.write_value(&v).unwrap());
+        }
+
+        let element = TestStruct {
+            time: 9999999999,
+            value: 50.0,
+        };
+        file_ref.insert(&element)?;
+
+        assert_eq!(401, file_ref.row_count());
+
+        {
+            let mut reader = file_ref.reader(1);
+
+            let result = reader.read_value_at(0)?;
+            let expected = values_to_write[0];
+
+            println!("{expected:?} -> {result:?}");
+            assert_eq!(expected, result);
+
+            let result = reader.read_value_at(1)?;
+
+            let expected = values_to_write[1];
+            println!("{expected:?} -> {result:?}");
+            assert_eq!(expected, result);
+
+            let result = reader.read_value_at(reader.row_count() - 1)?;
+            let expected = element;
+
+            println!("{expected:?} -> {result:?}");
+            assert_eq!(expected, result);
+
+            for i in 0..reader.row_count() {
+                let result = reader.read_value_at(i)?;
+                if i == reader.row_count() - 1 {
+                    assert_eq!(element, result);
+                } else {
+                    assert_eq!(values_to_write[i], result);
+                }
+            }
         }
 
         Ok(())

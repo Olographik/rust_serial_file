@@ -2,12 +2,10 @@ use std::{fs::File, sync::Arc};
 
 use pyo3::{PyResult, pyclass, pymethods};
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
-use rust_serial_file::file::{
-    FileReference,
-    position::{Query, struct_reader_look_up},
-    struct_file::StructFile,
-};
+use rust_serial_file::file::position::binary_look_up_file_struct;
+use rust_serial_file::file::{FileReference, struct_file::StructFile};
 use rust_serial_file::serialized_struct;
+use rust_serial_file::utils::binary_search::SearchQuery;
 use serialized_struct_derive::SerializedStruct;
 
 use crate::file::PyPosition;
@@ -73,9 +71,8 @@ impl PyExampleFile {
 
     pub fn find_by_index(&mut self, index: u64) -> PyPosition {
         let mut reader = self.f.reader(24);
-        let query = Query::ExactOrBefore(index);
-        let pos = struct_reader_look_up(&mut reader, &query);
-        PyPosition(pos)
+        let pos = binary_look_up_file_struct(&mut reader, &index, SearchQuery::BeforeOrExact);
+        PyPosition(pos.into())
     }
 
     pub fn write(&mut self, value: &ExamplStruct) -> PyResult<()> {

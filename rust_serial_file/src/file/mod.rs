@@ -306,6 +306,14 @@ impl<T: FileNeededTrait> BufferedReader<T> {
         }
     }
 
+    pub fn file_size(&self) -> u64 {
+        self.file.file_size()
+    }
+
+    pub fn row_count(&self) -> usize {
+        self.file.row_count()
+    }
+
     pub fn reset(&mut self) {
         self.buffer_position = 0;
         self.buffer_read_size = 0;
@@ -383,6 +391,14 @@ impl<T: FileNeededTrait> BufferedWriter<T> {
             buffer: Vec::with_capacity(capacity),
             buffer_position: 0,
         }
+    }
+
+    pub fn file_size(&mut self) -> u64 {
+        self.file.file_size()
+    }
+
+    pub fn row_count(&self) -> usize {
+        self.file.row_count()
     }
 
     pub fn flush(&mut self) -> anyhow::Result<()> {
