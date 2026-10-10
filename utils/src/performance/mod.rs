@@ -103,7 +103,7 @@ impl fmt::Display for AveragePerformance {
     }
 }
 
-trait Action {
+pub trait Action {
     fn init(&mut self) {
         // initialize the action, set the context
     }
@@ -122,12 +122,13 @@ impl<F: FnMut()> Action for F {
     }
 }
 
-struct ActionAgent {
+pub struct ActionAgent {
     pub measure: AveragePerformance,
     pub action: Box<dyn Action>,
     pub agent_name: String,
 }
 
+#[macro_export]
 macro_rules! action_agent {
     ($action:path) => {
         $crate::performance::ActionAgent::new(stringify!($action), Box::new($action))
@@ -177,7 +178,7 @@ impl fmt::Display for ActionAgent {
     }
 }
 
-struct Tester {
+pub struct Tester {
     pub loop_count: usize,
     pub actions: Vec<ActionAgent>,
 }

@@ -9,3 +9,4 @@ serialized_struct_derive={path = "../serialized_struct_derive"}
 
 [dev-dependencies]
 tempfile = "3.23.0"
+utils={path = "../utils"}
