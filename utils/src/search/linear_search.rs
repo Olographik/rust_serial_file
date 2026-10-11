@@ -102,6 +102,52 @@ where
     if size == 0 {
         return SearchIndexes::none();
     }
+    if size == 1 {
+        return match comparator(0) {
+            Ordering::Less => SearchIndexes {
+                before: Some(0),
+                exact: None,
+                after: None,
+            },
+            Ordering::Equal => SearchIndexes {
+                before: None,
+                exact: Some(0),
+                after: None,
+            },
+            Ordering::Greater => SearchIndexes {
+                before: None,
+                exact: None,
+                after: Some(0),
+            },
+        };
+    }
+
+    match comparator(0) {
+        Ordering::Less => {
+            let upper = size - 1;
+            match comparator(upper) {
+                Ordering::Less => {
+                    return SearchIndexes {
+                        before: Some(upper),
+                        exact: None,
+                        after: None,
+                    };
+                }
+                Ordering::Equal => return SearchIndexes::from_exact_point(upper, size),
+                Ordering::Greater => {
+                    //go through
+                }
+            }
+        }
+        Ordering::Equal => return SearchIndexes::from_exact_point(0, size),
+        Ordering::Greater => {
+            return SearchIndexes {
+                before: None,
+                exact: None,
+                after: Some(0),
+            };
+        }
+    }
 
     let search = if let Some(index) = context.0 {
         let comp = comparator(index);
