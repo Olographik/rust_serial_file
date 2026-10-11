@@ -2,7 +2,7 @@ use std::{thread::sleep, time::Duration};
 
 use crate::{
     performance::{Action, ActionAgent, Tester},
-    search::{binary_search, binary_search_v2},
+    search::{binary_search, binary_search_v2, search_type::SearchContext},
 };
 
 static VECTOR_SIZE: usize = 1000;
@@ -80,6 +80,41 @@ impl Action for ActionV2 {
     }
 }
 
+struct ActionV2Context {
+    base: BaseAction,
+    context: SearchContext,
+    base_context: SearchContext,
+}
+impl ActionV2Context {
+    pub fn new(base: BaseAction) -> Self {
+        Self {
+            base,
+            context: SearchContext::none(),
+            base_context: SearchContext::none(),
+        }
+    }
+    pub fn new_with_context(base: BaseAction, context: SearchContext) -> Self {
+        Self {
+            base,
+            context: context.clone(),
+            base_context: context,
+        }
+    }
+}
+
+impl Action for ActionV2Context {
+    fn init(&mut self) {
+        self.context = self.base_context.clone();
+    }
+    fn execute(&mut self) {
+        binary_search_v2::dicotomic_search_with_context(
+            &self.base.data,
+            &self.base.query,
+            &mut self.context,
+        );
+    }
+}
+
 struct ActionV1All(pub BaseAction);
 impl Action for ActionV1All {
     fn execute(&mut self) {
@@ -109,9 +144,17 @@ pub fn compare_search() {
 
     let check_v1 = ActionV1(check.clone());
     let check_v2 = ActionV2(check.clone());
+    let check_v2_context = ActionV2Context::new(check.clone());
+    let check_v2_context_init =
+        ActionV2Context::new_with_context(check.clone(), SearchContext::of(1));
 
     tester.add(ActionAgent::new("v1", Box::new(check_v1)));
     tester.add(ActionAgent::new("v2", Box::new(check_v2)));
+    tester.add(ActionAgent::new("v2_context", Box::new(check_v2_context)));
+    tester.add(ActionAgent::new(
+        "check_v2_context_init",
+        Box::new(check_v2_context_init),
+    ));
 
     tester.execute();
 
@@ -126,9 +169,17 @@ pub fn compare_search_middle() {
 
     let check_v1 = ActionV1(check.clone());
     let check_v2 = ActionV2(check.clone());
+    let check_v2_context = ActionV2Context::new(check.clone());
+    let check_v2_context_init =
+        ActionV2Context::new_with_context(check.clone(), SearchContext::of(VECTOR_SIZE / 4));
 
     tester.add(ActionAgent::new("v1", Box::new(check_v1)));
     tester.add(ActionAgent::new("v2", Box::new(check_v2)));
+    tester.add(ActionAgent::new("v2_context", Box::new(check_v2_context)));
+    tester.add(ActionAgent::new(
+        "check_v2_context_init",
+        Box::new(check_v2_context_init),
+    ));
 
     tester.execute();
 
@@ -144,9 +195,17 @@ pub fn compare_search_out() {
 
     let check_v1 = ActionV1(check.clone());
     let check_v2 = ActionV2(check.clone());
+    let check_v2_context = ActionV2Context::new(check.clone());
+    let check_v2_context_init =
+        ActionV2Context::new_with_context(check.clone(), SearchContext::of(1));
 
     tester.add(ActionAgent::new("v1", Box::new(check_v1)));
     tester.add(ActionAgent::new("v2", Box::new(check_v2)));
+    tester.add(ActionAgent::new("v2_context", Box::new(check_v2_context)));
+    tester.add(ActionAgent::new(
+        "check_v2_context_init",
+        Box::new(check_v2_context_init),
+    ));
 
     tester.execute();
 
@@ -162,9 +221,17 @@ pub fn compare_search_out_upper() {
 
     let check_v1 = ActionV1(check.clone());
     let check_v2 = ActionV2(check.clone());
+    let check_v2_context = ActionV2Context::new(check.clone());
+    let check_v2_context_init =
+        ActionV2Context::new_with_context(check.clone(), SearchContext::of(1));
 
     tester.add(ActionAgent::new("v1", Box::new(check_v1)));
     tester.add(ActionAgent::new("v2", Box::new(check_v2)));
+    tester.add(ActionAgent::new("v2_context", Box::new(check_v2_context)));
+    tester.add(ActionAgent::new(
+        "check_v2_context_init",
+        Box::new(check_v2_context_init),
+    ));
 
     tester.execute();
 
@@ -180,9 +247,17 @@ pub fn compare_search_single() {
 
     let check_v1 = ActionV1(check.clone());
     let check_v2 = ActionV2(check.clone());
+    let check_v2_context = ActionV2Context::new(check.clone());
+    let check_v2_context_init =
+        ActionV2Context::new_with_context(check.clone(), SearchContext::of(1));
 
     tester.add(ActionAgent::new("v1", Box::new(check_v1)));
     tester.add(ActionAgent::new("v2", Box::new(check_v2)));
+    tester.add(ActionAgent::new("v2_context", Box::new(check_v2_context)));
+    tester.add(ActionAgent::new(
+        "check_v2_context_init",
+        Box::new(check_v2_context_init),
+    ));
 
     tester.execute();
 
@@ -198,9 +273,17 @@ pub fn compare_search_all() {
 
     let check_v1 = ActionV1All(check.clone());
     let check_v2 = ActionV2All(check.clone());
+    let check_v2_context = ActionV2Context::new(check.clone());
+    let check_v2_context_init =
+        ActionV2Context::new_with_context(check.clone(), SearchContext::of(1));
 
     tester.add(ActionAgent::new("v1", Box::new(check_v1)));
     tester.add(ActionAgent::new("v2", Box::new(check_v2)));
+    tester.add(ActionAgent::new("v2_context", Box::new(check_v2_context)));
+    tester.add(ActionAgent::new(
+        "check_v2_context_init",
+        Box::new(check_v2_context_init),
+    ));
 
     tester.execute();
 

@@ -49,6 +49,7 @@ impl SearchIndexes {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
 pub struct SearchContext(pub Option<usize>);
 
 impl SearchContext {
