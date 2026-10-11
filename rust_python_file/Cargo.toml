@@ -10,6 +10,7 @@ name="rust_python_file"
 [dependencies]
 rust_serial_file={path = "../rust_serial_file"}
 serialized_struct_derive={path = "../serialized_struct_derive"}
+utils={path = "../utils"}
 pyo3 = { version = "0.28", features = ["extension-module"] }
 pyo3-stub-gen = "0.22.2"
 

@@ -3,10 +3,11 @@ use std::{
     ops::{Deref, DerefMut},
 };
 
+use utils::search::search_type::SearchIndexes;
+
 use crate::{
     file::position::{Position, binary_look_up_file_struct},
     serialized_struct::SerializedStruct,
-    utils::binary_search::{SearchIndex, SearchQuery},
 };
 
 use super::{BufferedReader, BufferedWriter, FileNeededTrait, FileReference};
@@ -33,7 +34,7 @@ impl<S: SerializedStruct, F: FileNeededTrait> StructFile<S, F> {
         StructBufferedReader::wrap(self, row_count)
     }
 
-    pub fn find_by_key<K>(&mut self, key: &K) -> SearchIndex
+    pub fn find_by_key<K>(&mut self, key: &K) -> SearchIndexes
     where
         S: PartialOrd<K>,
     {
@@ -41,7 +42,7 @@ impl<S: SerializedStruct, F: FileNeededTrait> StructFile<S, F> {
         reader.find_by_key(key)
     }
 
-    pub fn find_by_element(&mut self, element: &S) -> SearchIndex
+    pub fn find_by_element(&mut self, element: &S) -> SearchIndexes
     where
         S: PartialOrd<S>,
     {
@@ -98,16 +99,22 @@ impl<S: SerializedStruct, F: FileNeededTrait> StructFile<S, F> {
         self.write_value_at(element, index)
     }
 
+    /// Insert element according to their position
+    /// If the element match an existing element, overide it
     pub fn insert(&mut self, element: &S) -> anyhow::Result<()>
     where
         S: PartialOrd<S>,
     {
         let existing_element = self.find_by_element(element);
-        match existing_element {
-            SearchIndex::None => self.append(element),
-            SearchIndex::Before(i) => self.insert_element_at(element, i + 1),
-            SearchIndex::Exact(i) => self.write_value_at(element, i),
-            SearchIndex::After(i) => self.insert_element_at(element, i),
+        if let Some(idx) = existing_element.exact {
+            self.write_value_at(element, idx)
+        } else if let Some(idx) = existing_element.before {
+            self.insert_element_at(element, idx + 1)
+        } else if let Some(idx) = existing_element.after {
+            // check ?
+            self.insert_element_at(element, idx)
+        } else {
+            self.append(element)
         }
     }
 }
@@ -146,7 +153,7 @@ impl<S: SerializedStruct, T: FileNeededTrait> StructBufferedReader<S, T> {
     }
 
     pub fn try_get(&mut self, position: &Position) -> Option<S> {
-        if *position == Position::None {
+        if position.is_none() {
             return None;
         }
         let idx = position.into();
@@ -157,18 +164,18 @@ impl<S: SerializedStruct, T: FileNeededTrait> StructBufferedReader<S, T> {
         }
     }
 
-    pub fn find_by_key<K>(&mut self, key: &K) -> SearchIndex
+    pub fn find_by_key<K>(&mut self, key: &K) -> SearchIndexes
     where
         S: PartialOrd<K> + PartialEq<K>,
     {
-        binary_look_up_file_struct(self, key, SearchQuery::Any)
+        binary_look_up_file_struct(self, key)
     }
 
-    pub fn find_by_element(&mut self, element: &S) -> SearchIndex
+    pub fn find_by_element(&mut self, element: &S) -> SearchIndexes
     where
         S: PartialOrd<S>,
     {
-        binary_look_up_file_struct(self, element, SearchQuery::Any)
+        binary_look_up_file_struct(self, element)
     }
 }
 
@@ -347,10 +354,22 @@ mod test {
 
     use super::StructFile;
 
-    #[derive(Debug, Clone, Copy, PartialEq, PartialOrd, SerializedStruct)]
+    #[derive(Debug, Clone, Copy, SerializedStruct)]
     struct TestStruct {
         time: u64,
         value: f32,
+    }
+
+    impl PartialEq for TestStruct {
+        fn eq(&self, other: &Self) -> bool {
+            self.time == other.time && self.value == other.value
+        }
+    }
+
+    impl PartialOrd for TestStruct {
+        fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+            self.time.partial_cmp(&other.time)
+        }
     }
 
     #[test]
@@ -646,6 +665,73 @@ mod test {
             for i in 0..reader.row_count() {
                 let result = reader.read_value_at(i)?;
                 if i == reader.row_count() - 1 {
+                    assert_eq!(element, result);
+                } else {
+                    assert_eq!(values_to_write[i], result);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_struct_file_insert_existing() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir().unwrap();
+
+        let file_path = dir.path().join("temp_file_buffer_reader.temp");
+
+        let mut values_to_write = Vec::new();
+        for i in 0..400 {
+            values_to_write.push(struct_create((i + 1) * 10));
+        }
+
+        let file_ref = FileReference::free_from_path(file_path, 0, 0, false)?;
+        let mut file_ref = StructFile::wrap(file_ref);
+
+        {
+            let mut write_file: super::StructBufferedWriter<
+                TestStruct,
+                std::sync::Arc<std::fs::File>,
+            > = file_ref.writer(100);
+            //create a temp file
+            values_to_write
+                .iter()
+                .for_each(|v| write_file.write_value(&v).unwrap());
+        }
+
+        let element = TestStruct {
+            time: 2000,
+            value: 50.0,
+        };
+        file_ref.insert(&element)?;
+
+        assert_eq!(400, file_ref.row_count());
+
+        {
+            let mut reader = file_ref.reader(1);
+
+            let result = reader.read_value_at(0)?;
+            let expected = values_to_write[0];
+
+            println!("{expected:?} -> {result:?}");
+            assert_eq!(expected, result);
+
+            let result = reader.read_value_at(1)?;
+
+            let expected = values_to_write[1];
+            println!("{expected:?} -> {result:?}");
+            assert_eq!(expected, result);
+
+            let result = reader.read_value_at(199)?;
+            let expected = element;
+
+            println!("{expected:?} -> {result:?}");
+            assert_eq!(expected, result);
+
+            for i in 0..reader.row_count() {
+                let result = reader.read_value_at(i)?;
+                if i == 199 {
                     assert_eq!(element, result);
                 } else {
                     assert_eq!(values_to_write[i], result);

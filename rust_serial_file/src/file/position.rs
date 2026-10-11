@@ -1,65 +1,103 @@
+use std::ops::{Deref, DerefMut};
+
 use crate::{
     file::{FileNeededTrait, struct_file::StructBufferedReader},
     serialized_struct::SerializedStruct,
-    utils::binary_search::{SearchIndex, SearchQuery, comparator_dicotomic_search},
+};
+use utils::search::{
+    binary_search_v2::{
+        comparator_dicotomic_search_no_context, comparator_dicotomic_search_with_context,
+    },
+    search_type::{SearchContext, SearchIndexes},
 };
 
 #[derive(Debug, PartialEq, PartialOrd, Clone, Copy)]
-pub enum Position {
-    None,
-    Exact(usize),
-}
+pub struct Position(Option<usize>);
 
 impl Into<usize> for Position {
     fn into(self) -> usize {
-        match self {
-            Position::None => 0,
-            Position::Exact(i) => i,
+        match self.0 {
+            None => 0,
+            Some(i) => i,
         }
     }
 }
 impl Into<usize> for &Position {
     fn into(self) -> usize {
-        match self {
-            Position::None => 0,
-            Position::Exact(i) => *i,
+        match &self.0 {
+            None => 0,
+            Some(i) => *i,
         }
     }
 }
 impl From<usize> for Position {
     fn from(value: usize) -> Self {
-        Position::Exact(value)
+        Position(Some(value))
     }
 }
 
-impl Into<Position> for SearchIndex {
+impl Into<Position> for SearchIndexes {
     fn into(self) -> Position {
-        match self {
-            SearchIndex::None => Position::None,
-            SearchIndex::Before(i) => Position::Exact(i),
-            SearchIndex::Exact(i) => Position::Exact(i),
-            SearchIndex::After(i) => Position::Exact(i),
+        if let Some(idx) = self.exact {
+            idx.into()
+        } else if let Some(idx) = self.before {
+            idx.into()
+        } else if let Some(idx) = self.after {
+            idx.into()
+        } else {
+            Position(None)
         }
+    }
+}
+
+impl Deref for Position {
+    type Target = Option<usize>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for Position {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
     }
 }
 
 pub fn binary_look_up_file_struct<S, F, K>(
     file: &mut StructBufferedReader<S, F>,
     target: &K,
-    query: SearchQuery,
-) -> SearchIndex
+) -> SearchIndexes
 where
     S: SerializedStruct + PartialOrd<K>,
     F: FileNeededTrait,
 {
     let row_count = file.row_count();
-    comparator_dicotomic_search(
+    comparator_dicotomic_search_no_context(
         |i| {
             let query_value = file.read_value_at(i).unwrap();
             query_value.partial_cmp(target).unwrap()
         },
         row_count,
-        query,
+    )
+}
+
+pub fn binary_look_up_file_struct_with_context<S, F, K>(
+    file: &mut StructBufferedReader<S, F>,
+    target: &K,
+    context: &mut SearchContext,
+) -> SearchIndexes
+where
+    S: SerializedStruct + PartialOrd<K>,
+    F: FileNeededTrait,
+{
+    let row_count = file.row_count();
+    comparator_dicotomic_search_with_context(
+        |i| {
+            let query_value = file.read_value_at(i).unwrap();
+            query_value.partial_cmp(target).unwrap()
+        },
+        row_count,
+        context,
     )
 }
 
@@ -67,9 +105,9 @@ where
 mod test {
     use crate::{file::FileReference, serialized_struct};
     use serialized_struct_derive::SerializedStruct;
+    use utils::search::search_type::SearchIndexes;
 
     use crate::file::{position::binary_look_up_file_struct, struct_file::StructFile};
-    use crate::utils::binary_search::{SearchIndex, SearchQuery};
 
     #[derive(Debug, Clone, Copy, PartialEq, SerializedStruct)]
     struct TestStruct {
@@ -146,80 +184,41 @@ mod test {
         {
             let mut reader = file_ref.reader(1);
             let x = 4;
-            let pos = binary_look_up_file_struct(&mut reader, &x, SearchQuery::Exact);
+            let pos = binary_look_up_file_struct(&mut reader, &x);
 
             println!("Found position {:?}", pos);
-            assert_eq!(SearchIndex::Exact(3), pos);
-
-            let x = 4;
-            let pos = binary_look_up_file_struct(&mut reader, &x, SearchQuery::AfterOnly);
-            println!("Found position {:?}", pos);
-            assert_eq!(SearchIndex::After(4), pos);
-
-            let x = 4;
-            let pos = binary_look_up_file_struct(&mut reader, &x, SearchQuery::BeforeOnly);
-            println!("Found position {:?}", pos);
-            assert_eq!(SearchIndex::Before(2), pos);
-
-            let x = 4;
-            let pos = binary_look_up_file_struct(&mut reader, &x, SearchQuery::AfterOrExact);
-            println!("Found position {:?}", pos);
-            assert_eq!(SearchIndex::Exact(3), pos);
-
-            let x = 4;
-            let pos = binary_look_up_file_struct(&mut reader, &x, SearchQuery::BeforeOrExact);
-            println!("Found position {:?}", pos);
-            assert_eq!(SearchIndex::Exact(3), pos);
+            assert_eq!(
+                SearchIndexes {
+                    before: Some(2),
+                    exact: Some(3),
+                    after: Some(4),
+                },
+                pos
+            );
 
             let x = 7;
-            let pos = binary_look_up_file_struct(&mut reader, &x, SearchQuery::BeforeOrExact);
+            let pos = binary_look_up_file_struct(&mut reader, &x);
             println!("Found position {:?}", pos);
-            assert_eq!(SearchIndex::Before(5), pos);
-
-            let x = 7;
-            let pos = binary_look_up_file_struct(&mut reader, &x, SearchQuery::BeforeOnly);
-            println!("Found position {:?}", pos);
-            assert_eq!(SearchIndex::Before(5), pos);
-
-            let x = 7;
-            let pos = binary_look_up_file_struct(&mut reader, &x, SearchQuery::Exact);
-            println!("Found position {:?}", pos);
-            assert_eq!(SearchIndex::None, pos);
-
-            let x = 7;
-            let pos = binary_look_up_file_struct(&mut reader, &x, SearchQuery::AfterOnly);
-            println!("Found position {:?}", pos);
-            assert_eq!(SearchIndex::None, pos);
-
-            let x = 7;
-            let pos = binary_look_up_file_struct(&mut reader, &x, SearchQuery::AfterOrExact);
-            println!("Found position {:?}", pos);
-            assert_eq!(SearchIndex::None, pos);
+            assert_eq!(
+                SearchIndexes {
+                    before: Some(5),
+                    exact: None,
+                    after: None,
+                },
+                pos
+            );
 
             let x = 0;
-            let pos = binary_look_up_file_struct(&mut reader, &x, SearchQuery::BeforeOrExact);
+            let pos = binary_look_up_file_struct(&mut reader, &x);
             println!("Found position {:?}", pos);
-            assert_eq!(SearchIndex::None, pos);
-
-            let x = 0;
-            let pos = binary_look_up_file_struct(&mut reader, &x, SearchQuery::BeforeOnly);
-            println!("Found position {:?}", pos);
-            assert_eq!(SearchIndex::None, pos);
-
-            let x = 0;
-            let pos = binary_look_up_file_struct(&mut reader, &x, SearchQuery::Exact);
-            println!("Found position {:?}", pos);
-            assert_eq!(SearchIndex::None, pos);
-
-            let x = 0;
-            let pos = binary_look_up_file_struct(&mut reader, &x, SearchQuery::AfterOnly);
-            println!("Found position {:?}", pos);
-            assert_eq!(SearchIndex::After(0), pos);
-
-            let x = 0;
-            let pos = binary_look_up_file_struct(&mut reader, &x, SearchQuery::AfterOrExact);
-            println!("Found position {:?}", pos);
-            assert_eq!(SearchIndex::After(0), pos);
+            assert_eq!(
+                SearchIndexes {
+                    before: None,
+                    exact: None,
+                    after: Some(0),
+                },
+                pos
+            );
         }
 
         Ok(())
@@ -267,62 +266,62 @@ mod test {
     //         let mut reader = file_ref.reader(1);
 
     //         let x = 3;
-    //         let pos = binary_look_up_file_struct(&mut reader, &x, SearchQuery::Exact);
+    //         let pos = binary_look_up_file_struct(&mut reader, &x);
     //         println!("Found position {:?}", pos);
     //         assert_eq!(Position::None, pos);
     //         let pos_int: usize = pos.into();
     //         assert_eq!(0, pos_int);
 
     //         let x = 5;
-    //         let pos = binary_look_up_file_struct(&mut reader, &x, SearchQuery::BeforeOnly);
+    //         let pos = binary_look_up_file_struct(&mut reader, &x);
     //         println!("Found position {:?}", pos);
     //         let pos_int: usize = pos.into();
     //         assert_eq!(1, pos_int);
 
     //         let x = 5;
-    //         let pos = binary_look_up_file_struct(&mut reader, &x, SearchQuery::BeforeOrExact);
+    //         let pos = binary_look_up_file_struct(&mut reader, &x);
     //         println!("Found position {:?}", pos);
     //         let pos_int: usize = pos.into();
     //         assert_eq!(1, pos_int);
 
     //         let x = 5;
-    //         let pos = binary_look_up_file_struct(&mut reader, &x, SearchQuery::AfterOnly);
+    //         let pos = binary_look_up_file_struct(&mut reader, &x);
     //         println!("Found position {:?}", pos);
     //         let pos_int: usize = pos.into();
     //         assert_eq!(2, pos_int);
 
     //         let x = 5;
-    //         let pos = binary_look_up_file_struct(&mut reader, &x, SearchQuery::AfterOrExact);
+    //         let pos = binary_look_up_file_struct(&mut reader, &x);
     //         println!("Found position {:?}", pos);
     //         let pos_int: usize = pos.into();
     //         assert_eq!(2, pos_int);
 
     //         let x = 4;
-    //         let pos = binary_look_up_file_struct(&mut reader, &x, SearchQuery::Exact);
+    //         let pos = binary_look_up_file_struct(&mut reader, &x);
     //         println!("Found position {:?}", pos);
     //         let pos_int: usize = pos.into();
     //         assert_eq!(1, pos_int);
 
     //         let x = 4;
-    //         let pos = binary_look_up_file_struct(&mut reader, &x, SearchQuery::BeforeOnly);
+    //         let pos = binary_look_up_file_struct(&mut reader, &x);
     //         println!("Found position {:?}", pos);
     //         let pos_int: usize = pos.into();
     //         assert_eq!(0, pos_int);
 
     //         let x = 4;
-    //         let pos = binary_look_up_file_struct(&mut reader, &x, SearchQuery::BeforeOrExact);
+    //         let pos = binary_look_up_file_struct(&mut reader, &x);
     //         println!("Found position {:?}", pos);
     //         let pos_int: usize = pos.into();
     //         assert_eq!(1, pos_int);
 
     //         let x = 4;
-    //         let pos = binary_look_up_file_struct(&mut reader, &x, SearchQuery::AfterOnly);
+    //         let pos = binary_look_up_file_struct(&mut reader, &x);
     //         println!("Found position {:?}", pos);
     //         let pos_int: usize = pos.into();
     //         assert_eq!(2, pos_int);
 
     //         let x = 4;
-    //         let pos = binary_look_up_file_struct(&mut reader, &x, SearchQuery::AfterOrExact);
+    //         let pos = binary_look_up_file_struct(&mut reader, &x);
     //         println!("Found position {:?}", pos);
     //         let pos_int: usize = pos.into();
     //         assert_eq!(1, pos_int);

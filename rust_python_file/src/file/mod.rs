@@ -31,7 +31,7 @@ pub struct PyPosition(pub Position);
 impl PyPosition {
     #[new]
     pub fn new(index: usize) -> Self {
-        Self(Position::Exact(index))
+        Self(index.into())
     }
 
     fn index(&self) -> usize {
