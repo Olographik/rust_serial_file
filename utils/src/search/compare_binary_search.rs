@@ -10,7 +10,7 @@ use crate::{
 
 static VECTOR_SIZE: usize = 1000;
 static LOOP_COUNT: usize = 100;
-static SLEEP_MICRO: u64 = 1;
+static SLEEP_MICRO: u64 = 0;
 
 #[derive(Clone, Copy)]
 struct ComplexStruct {
@@ -20,8 +20,10 @@ struct ComplexStruct {
 }
 impl ComplexStruct {
     pub fn get(&self) -> &Self {
-        // simulate the fetch case (reading file, api call)
-        sleep(Duration::from_micros(SLEEP_MICRO));
+        if SLEEP_MICRO > 0 {
+            // simulate the fetch case (reading file, api call)
+            sleep(Duration::from_micros(SLEEP_MICRO));
+        }
         self
     }
 }
