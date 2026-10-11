@@ -1,24 +1,6 @@
 use std::{cmp::Ordering, fmt::Debug};
 
-#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
-pub struct SearchIndexes {
-    /// The element before key
-    pub before: Option<usize>,
-    /// The element matching key
-    pub exact: Option<usize>,
-    /// The element after key
-    pub after: Option<usize>,
-}
-
-impl SearchIndexes {
-    pub fn none() -> Self {
-        Self {
-            before: None,
-            exact: None,
-            after: None,
-        }
-    }
-}
+use crate::search::search_type::SearchIndexes;
 
 /// Comparator: comparator(index) -> ordering
 /// Size must be at least 2
