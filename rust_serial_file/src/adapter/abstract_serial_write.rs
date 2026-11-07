@@ -168,6 +168,17 @@ mod tests {
     }
 
     #[test]
+    fn index_out_of_bounds_error_has_a_readable_message() {
+        let error = SerialDataWriterError::IndexOutOfBounds { index: 4, len: 2 };
+
+        assert_eq!(
+            error.to_string(),
+            "index 4 is out of bounds for collection of length 2"
+        );
+        assert!(std::error::Error::source(&error).is_none());
+    }
+
+    #[test]
     fn serial_write_at_replaces_existing_record_and_rejects_invalid_index() {
         let mut values = vec![10, 20, 30];
         values.serial_write_at(1, 25).unwrap();
@@ -276,11 +287,36 @@ mod tests {
     }
 
     #[test]
-    fn backend_write_failures_are_returned_to_the_caller() {
+    fn simulated_backend_failures_are_returned_for_each_operation() {
         let mut writer = SimulatedFailingWriter;
 
-        let error = writer.serial_write(10).unwrap_err();
-
-        assert_eq!(error.to_string(), "simulated backend failure");
+        assert_eq!(
+            writer.serial_write(10).unwrap_err().to_string(),
+            "simulated backend failure"
+        );
+        assert_eq!(
+            writer.serial_insert(0, 10).unwrap_err().to_string(),
+            "simulated backend failure"
+        );
+        assert_eq!(
+            writer.serial_write_at(0, 10).unwrap_err().to_string(),
+            "simulated backend failure"
+        );
+        assert_eq!(
+            writer.serial_remove(0).unwrap_err().to_string(),
+            "simulated backend failure"
+        );
+        assert_eq!(
+            writer.serial_remove_get(0).unwrap_err().to_string(),
+            "simulated backend failure"
+        );
+        assert_eq!(
+            writer.serial_clear().unwrap_err().to_string(),
+            "simulated backend failure"
+        );
+        assert_eq!(
+            writer.serial_truncate(0).unwrap_err().to_string(),
+            "simulated backend failure"
+        );
     }
 }
