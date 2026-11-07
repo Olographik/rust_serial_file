@@ -46,19 +46,31 @@ Describe the component, the problem it addresses, and its intended users.
 
 ### Functional requirements
 
-- **FR-1:** Describe an observable behavior the component must provide.
-- **FR-2:** Describe expected behavior for relevant inputs, boundary cases, and state changes.
+Use one row per requirement. Prefix each ID with a short, recognizable
+identifier for the project, followed by its category and a zero-padded
+sequence number (for example, `MYPROJ-FR-001`). Use the same project prefix
+throughout this document so IDs are unique, stable, and easy to reference from
+tests and acceptance criteria.
+
+| ID | Requirement |
+|---|---|
+| `{{PROJECT_PREFIX}}-FR-001` | Describe an observable behavior the component must provide. |
+| `{{PROJECT_PREFIX}}-FR-002` | Describe expected behavior for relevant inputs, boundary cases, and state changes. |
 
 ### Data and serialization
 
-- Specify data models, invariants, formats, and compatibility requirements, if applicable.
-- Define how invalid, missing, or incomplete data is handled.
+| ID | Requirement |
+|---|---|
+| `{{PROJECT_PREFIX}}-DS-001` | Specify data models, invariants, formats, and compatibility requirements, if applicable. |
+| `{{PROJECT_PREFIX}}-DS-002` | Define how invalid, missing, or incomplete data is handled. |
 
 ### Rust-specific requirements
 
-- Specify required traits, ownership and borrowing behavior, lifetimes, and generic bounds.
-- Define collection semantics and indexing behavior, if applicable.
-- State the Rust edition, MSRV, and any relevant platform requirements.
+| ID | Requirement |
+|---|---|
+| `{{PROJECT_PREFIX}}-RS-001` | Specify required traits, ownership and borrowing behavior, lifetimes, and generic bounds. |
+| `{{PROJECT_PREFIX}}-RS-002` | Define collection semantics and indexing behavior, if applicable. |
+| `{{PROJECT_PREFIX}}-RS-003` | State the Rust edition, MSRV, and any relevant platform requirements. |
 
 ## Public API
 
@@ -113,7 +125,7 @@ Use **⏳ Not run** until the test has been executed, then set the status to
 
 | Test ID | Requirement IDs | Description of the test | Success requirements | Test file | Test name | Status |
 |---|---|---|---|---|---|---|
-| T-001 | FR-1 | Describe the unit, integration, or other test. | State the expected result that makes the test pass. | `path/to/test_file.rs` | `test_function_name` | ⏳ Not run / ✅ Success / ❌ Failed |
+| T-001 | `{{PROJECT_PREFIX}}-FR-001` | Describe the unit, integration, or other test. | State the expected result that makes the test pass. | `path/to/test_file.rs` | `test_function_name` | ⏳ Not run / ✅ Success / ❌ Failed |
 
 ### Acceptance criteria
 
