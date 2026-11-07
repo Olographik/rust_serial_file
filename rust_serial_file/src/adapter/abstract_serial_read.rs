@@ -3,6 +3,7 @@ use std::{cmp::Ordering, error::Error, fmt};
 use anyhow::{Result, anyhow};
 use utils::search::search_type::{SearchContext, SearchIndexes};
 
+/// Errors produced by the built-in `SerialDataReader` operations.
 #[derive(Debug, PartialEq, Eq)]
 pub enum SerialDataReaderError {
     IndexOutOfBounds { index: usize, len: usize },
@@ -27,20 +28,47 @@ impl fmt::Display for SerialDataReaderError {
 
 impl Error for SerialDataReaderError {}
 
+/// Reads owned records from a logically ordered serial collection.
+///
+/// Implementations may update internal state while reading, for example by
+/// refilling a file buffer or advancing a cursor. Those updates must not alter
+/// the logical records or their order. Operations that access backend data
+/// return [`anyhow::Result`] so storage and decoding errors remain observable.
+///
+/// Searches use binary search and therefore require records to be ordered
+/// according to the comparison used by the search. They do not sort or mutate
+/// the collection.
 pub trait SerialDataReader<T> {
+    /// Iterator over owned records in logical collection order.
+    ///
+    /// Errors encountered while reading individual records are yielded as
+    /// `Err` items.
     type Iter<'a>: Iterator<Item = Result<T>>
     where
         Self: 'a,
         T: 'a;
 
+    /// Returns the logical number of records.
+    ///
+    /// Implementations must make this metadata available without fallible
+    /// backend I/O.
     fn serial_len(&self) -> usize;
 
+    /// Returns whether the logical collection contains no records.
     fn serial_is_empty(&self) -> bool {
         self.serial_len() == 0
     }
 
+    /// Reads the record at the zero-based `index`.
+    ///
+    /// Returns an error if the index is out of bounds or if the backend cannot
+    /// read or decode the record.
     fn serial_get(&mut self, index: usize) -> Result<T>;
 
+    /// Reads the first record.
+    ///
+    /// Returns [`SerialDataReaderError::EmptyCollection`] when the collection
+    /// is empty, or propagates a backend read error.
     fn serial_first(&mut self) -> Result<T> {
         if self.serial_is_empty() {
             return Err(SerialDataReaderError::EmptyCollection.into());
@@ -48,6 +76,10 @@ pub trait SerialDataReader<T> {
         self.serial_get(0)
     }
 
+    /// Reads the last record.
+    ///
+    /// Returns [`SerialDataReaderError::EmptyCollection`] when the collection
+    /// is empty, or propagates a backend read error.
     fn serial_last(&mut self) -> Result<T> {
         let len = self.serial_len();
         if len == 0 {
@@ -56,8 +88,18 @@ pub trait SerialDataReader<T> {
         self.serial_get(len - 1)
     }
 
+    /// Creates an iterator that reads owned records in logical collection
+    /// order.
+    ///
+    /// Iterator creation may fail, and failures encountered during iteration
+    /// are yielded as `Err` items.
     fn serial_iter(&mut self) -> Result<Self::Iter<'_>>;
 
+    /// Finds a value using its `PartialOrd` ordering.
+    ///
+    /// Returns the index of a matching record, or `None` if no record matches.
+    /// Returns an error if a read fails or a comparison has no defined
+    /// ordering.
     fn serial_find(&mut self, value: &T) -> Result<Option<usize>>
     where
         T: PartialOrd<T>,
@@ -65,6 +107,12 @@ pub trait SerialDataReader<T> {
         self.serial_find_by(value)
     }
 
+    /// Finds a record by comparing it with `key`.
+    ///
+    /// `T` may be partially ordered against a key type different from `T`.
+    /// The collection must be ordered according to this comparison. Returns
+    /// the matching index, `None` if no record matches, or an error if a read
+    /// fails or the comparison has no defined ordering.
     fn serial_find_by<K>(&mut self, key: &K) -> Result<Option<usize>>
     where
         T: PartialOrd<K>,
@@ -79,6 +127,13 @@ pub trait SerialDataReader<T> {
         Ok(search.exact)
     }
 
+    /// Finds a record using a comparator against a captured search target.
+    ///
+    /// The comparator receives each visited record and returns its ordering
+    /// relative to the target (`Less` before it, `Equal` at it, and `Greater`
+    /// after it). Records must be ordered consistently with that comparison.
+    /// Returns the matching index, `None` if no record matches, or a backend
+    /// read error.
     fn serial_find_by_ordering<F>(&mut self, mut comparator: F) -> Result<Option<usize>>
     where
         F: FnMut(&T) -> Ordering,
@@ -91,6 +146,12 @@ pub trait SerialDataReader<T> {
         Ok(search.exact)
     }
 
+    /// Finds a value using its `PartialOrd` ordering and a search context.
+    ///
+    /// The context may seed the search and is updated with the resulting
+    /// search position. Returns the matching index, `None` if no record
+    /// matches, or an error if a read fails or a comparison has no defined
+    /// ordering.
     fn serial_find_with_context(
         &mut self,
         value: &T,
@@ -102,6 +163,13 @@ pub trait SerialDataReader<T> {
         self.serial_find_by_with_context(value, context)
     }
 
+    /// Finds a record by comparing it with `key`, using a search context.
+    ///
+    /// The context may seed the search and is updated with the resulting
+    /// search position. The collection must be ordered according to
+    /// `T: PartialOrd<K>`. Returns the matching index, `None` if no record
+    /// matches, or an error if a read fails or a comparison has no defined
+    /// ordering.
     fn serial_find_by_with_context<K>(
         &mut self,
         key: &K,
@@ -120,6 +188,13 @@ pub trait SerialDataReader<T> {
         Ok(search.exact)
     }
 
+    /// Finds a record using a comparator and a search context.
+    ///
+    /// The comparator returns each visited record's ordering relative to a
+    /// captured search target. The context may seed the search and is updated
+    /// with the resulting search position. Records must be ordered consistently
+    /// with the comparator. Returns the matching index, `None` if no record
+    /// matches, or a backend read error.
     fn serial_find_by_ordering_with_context<F>(
         &mut self,
         mut comparator: F,
@@ -136,6 +211,11 @@ pub trait SerialDataReader<T> {
         Ok(search.exact)
     }
 
+    /// Finds a value and reads the matching record.
+    ///
+    /// Returns `Ok(Some(record))` when a matching record is found,
+    /// `Ok(None)` when there is no match, or `Err` if searching or reading the
+    /// record fails.
     fn serial_find_and_get(&mut self, value: &T) -> Result<Option<T>>
     where
         T: PartialOrd<T>,
@@ -145,6 +225,11 @@ pub trait SerialDataReader<T> {
             .transpose()
     }
 
+    /// Finds a record by key and reads the matching record.
+    ///
+    /// Returns `Ok(Some(record))` when a matching record is found,
+    /// `Ok(None)` when there is no match, or `Err` if searching or reading the
+    /// record fails.
     fn serial_find_by_and_get<K>(&mut self, key: &K) -> Result<Option<T>>
     where
         T: PartialOrd<K>,
