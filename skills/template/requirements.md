@@ -1,0 +1,137 @@
+# Rust Component Requirements
+
+- **Date:** YYYY-MM-DD
+- **Author:** `{{GIT_USERNAME}}` (from `git config user.name`)
+- **Revision:** 0.1
+- **Short description:** A concise summary of the component and its purpose.
+
+## Table of contents
+
+- [Overview](#overview)
+- [Goals and scope](#goals-and-scope)
+- [Assumptions and dependencies](#assumptions-and-dependencies)
+- [Requirements](#requirements)
+- [Public API](#public-api)
+- [Errors and failure behavior](#errors-and-failure-behavior)
+- [Safety and security](#safety-and-security)
+- [Compatibility](#compatibility)
+- [Performance and resource use](#performance-and-resource-use)
+- [Phases](#phases)
+- [Testing and acceptance criteria](#testing-and-acceptance-criteria)
+- [Code coverage](#code-coverage)
+- [Out of scope](#out-of-scope)
+
+## Overview
+
+Describe the component, the problem it addresses, and its intended users.
+
+## Goals and scope
+
+### Goals
+
+- State the outcomes this component must provide.
+
+### Scope
+
+- Identify the modules, types, and behaviors covered by these requirements.
+- Note existing functionality that must remain unchanged.
+
+## Assumptions and dependencies
+
+- Record assumptions about the runtime environment, inputs, users, and deployment.
+- List required crates, external services, and relevant feature flags.
+- Specify the minimum supported Rust version (MSRV), if applicable.
+
+## Requirements
+
+### Functional requirements
+
+- **FR-1:** Describe an observable behavior the component must provide.
+- **FR-2:** Describe expected behavior for relevant inputs, boundary cases, and state changes.
+
+### Data and serialization
+
+- Specify data models, invariants, formats, and compatibility requirements, if applicable.
+- Define how invalid, missing, or incomplete data is handled.
+
+### Rust-specific requirements
+
+- Specify required traits, ownership and borrowing behavior, lifetimes, and generic bounds.
+- Define collection semantics and indexing behavior, if applicable.
+- State the Rust edition, MSRV, and any relevant platform requirements.
+
+## Public API
+
+- List required public modules, types, traits, functions, and methods.
+- Specify inputs, outputs, visibility, and whether operations are fallible.
+- Describe usage examples or API compatibility constraints, if applicable.
+
+## Errors and failure behavior
+
+- List failures callers must be able to observe and how they are reported.
+- Define behavior for invalid arguments and unavailable resources.
+- Specify whether cleanup or persistence can fail and how callers observe those failures.
+- Do not allow failures to be silently converted into success-shaped results.
+
+## Safety and security
+
+- State whether `unsafe` code is allowed and what justification or review it requires.
+- Specify input validation and handling of untrusted data.
+- Identify sensitive data and requirements for its storage, exposure, and cleanup.
+- Record any other security-sensitive behavior or threat assumptions relevant to the component.
+
+## Compatibility
+
+- Identify existing APIs and behavior that must be preserved.
+- State any required compatibility with data formats, dependencies, or other components.
+- Describe migration requirements if behavior or APIs intentionally change.
+
+## Performance and resource use
+
+- State measurable performance, memory, buffering, or resource-use constraints, if any.
+- Describe concurrency assumptions and resource ownership.
+- Mark unspecified performance characteristics as non-goals rather than implying guarantees.
+
+## Phases
+
+- [ ] Requirements clarified and accepted.
+- [ ] Design agreed, including relevant API and data structures.
+- [ ] Implementation completed.
+- [ ] Tests added and passing.
+- [ ] Documentation updated and changes reviewed.
+
+## Testing and acceptance criteria
+
+### Tests
+
+List every unit, integration, and other test that must be implemented and run to
+verify these requirements. Include relevant edge cases such as serialization,
+errors, boundaries, and compatibility. Add one row per test, link it to the
+requirement IDs it verifies, and fill in the specific test file and test name.
+Use **⏳ Not run** until the test has been executed, then set the status to
+**✅ Success** or **❌ Failed**.
+
+| Test ID | Requirement IDs | Description of the test | Success requirements | Test file | Test name | Status |
+|---|---|---|---|---|---|---|
+| T-001 | FR-1 | Describe the unit, integration, or other test. | State the expected result that makes the test pass. | `path/to/test_file.rs` | `test_function_name` | ⏳ Not run / ✅ Success / ❌ Failed |
+
+### Acceptance criteria
+
+1. The specified public behavior is implemented and documented.
+2. Relevant boundary and failure cases are tested.
+3. Existing behavior and compatibility requirements are preserved.
+4. The component passes the applicable formatting, lint, build, and test checks.
+
+## Code coverage
+
+Record the coverage results in this section or provide a path to a checked-in
+coverage summary file. Include the coverage tool, the measured scope, the
+coverage percentage, and any relevant threshold or uncovered areas.
+
+- **Coverage summary:** Add results here, or link a summary file such as
+  `path/to/coverage-summary.md`.
+
+## Out of scope
+
+- List explicitly excluded features, behaviors, and design decisions.
+- Record deferred decisions and who or what must resolve them before implementation.
