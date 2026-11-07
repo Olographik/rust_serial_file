@@ -250,7 +250,7 @@ observable collection semantics.
   and trait composition.
 - [x] Implementation completed.
 - [x] Tests added and passing.
-- [ ] Documentation updated and changes reviewed.
+- [x] Documentation and coverage results updated and reviewed.
 
 ## Testing and acceptance criteria
 
@@ -262,18 +262,22 @@ remain **⏳ Not run**.
 
 | Test ID | Requirement IDs | Description of the test | Success requirements | Test file | Test name | Status |
 |---|---|---|---|---|---|---|
-| T-001 | RSF-FR-001, RSF-FR-002, RSF-FR-003, RSF-FR-004, RSF-FR-005, RSF-FR-006, RSF-FR-010, RSF-RS-008 | Verify `Vec<T>` provides owned indexed, endpoint, and iteration reads, infallible length/empty queries, and not-found errors. | Reads return the expected cloned values in order; an invalid index and empty first read report the corresponding typed errors. | `src/adapter/abstract_serial_read.rs` | `vector_reader_returns_owned_records_and_reports_invalid_indices` | ✅ Success |
+| T-001 | RSF-FR-001, RSF-FR-002, RSF-FR-003, RSF-FR-004, RSF-FR-005, RSF-FR-006, RSF-FR-010, RSF-RS-008 | Verify `Vec<T>` provides owned indexed, endpoint, and iteration reads, infallible length/empty queries, and empty-collection behavior. | Reads return expected values in order; invalid indices and empty first/last reads report their typed errors; searching an empty reader returns no match. | `src/adapter/abstract_serial_read.rs` | `vector_reader_returns_owned_records_and_reports_invalid_indices` | ✅ Success |
 | T-002 | RSF-FR-011, RSF-FR-012, RSF-FR-013, RSF-RS-006 | Verify value, key, and comparator searches, a key search with context, and both value/key find-and-get operations. | Matching searches return the expected index or value; missing keys return `None`; context is updated to the found index. | `src/adapter/abstract_serial_read.rs` | `reader_searches_by_value_key_and_comparator` | ✅ Success |
 | T-003 | RSF-RS-007 | Verify key search reports undefined `PartialOrd` ordering. | Searching values containing `NaN` returns the typed `UndefinedOrdering` error rather than panicking. | `src/adapter/abstract_serial_read.rs` | `undefined_partial_ordering_is_reported` | ✅ Success |
 | T-004 | RSF-FR-007, RSF-FR-008, RSF-FR-009 | Verify reads and iteration across backend buffer state changes. | Refills do not change values, skip records, duplicate records, or reorder iteration. | `src/adapter/abstract_serial_read.rs` | `buffered_reads_preserve_records_across_refills_and_iteration` | ✅ Success |
-| T-005 | RSF-FR-003, RSF-FR-005, RSF-FR-011, RSF-FR-012 | Verify backend failures during indexed reads, searches, iterator creation, and per-item iteration. | Each failure remains observable as an error and is not converted into not-found or normal iteration completion. | `src/adapter/abstract_serial_read.rs` | `backend_read_and_iterator_errors_remain_observable` | ✅ Success |
+| T-005 | RSF-FR-003, RSF-FR-005, RSF-FR-011, RSF-FR-012 | Verify backend failures during indexed, first, and last reads, iterator creation, and per-item iteration, plus out-of-range errors in the buffered reader. | Each failure remains observable as an error and is not converted into not-found or normal iteration completion. | `src/adapter/abstract_serial_read.rs` | `backend_read_and_iterator_errors_remain_observable` | ✅ Success |
 | T-006 | RSF-FR-012 | Verify context-aware searches and find-and-get found, no-match, and error outcomes. | Context-aware methods return the expected result and context; find-and-get returns `Ok(Some(value))`, `Ok(None)`, or `Err` as appropriate. | `src/adapter/abstract_serial_read.rs` | `context_search_and_find_and_get_report_all_outcomes` | ✅ Success |
-| T-007 | RSF-FR-001, RSF-FR-002, RSF-FR-005, RSF-FR-006 | Verify an alternate map-backed reader implements the shared contract through a generic caller. | Generic read code works without relying on backend-specific method names and reads records in logical order. | `src/adapter/abstract_serial_read.rs` | `generic_read_client_supports_an_alternate_backend` | ✅ Success |
+| T-007 | RSF-FR-001, RSF-FR-002, RSF-FR-003, RSF-FR-005, RSF-FR-006 | Verify an alternate map-backed reader implements the shared contract through a generic caller, including iterator-creation and out-of-range errors. | Generic read code works without relying on backend-specific method names; reads preserve logical order and failures remain observable. | `src/adapter/abstract_serial_read.rs` | `generic_read_client_supports_an_alternate_backend` | ✅ Success |
+| T-008 | RSF-RS-007, RSF-RS-008 | Verify reader error display messages and standard error-source behavior. | All built-in error variants display their documented messages and expose no nested source. | `src/adapter/abstract_serial_read.rs` | `reader_errors_have_display_messages_and_no_sources` | ✅ Success |
+| T-009 | RSF-FR-011, RSF-FR-012, RSF-FR-013, RSF-RS-006, RSF-RS-007 | Verify empty searches, before-first and after-last results, context seeds on either side and on a match, and inconsistent comparator handling. | Empty and missing values return `None`; context-based searches return the correct result and update the context; an inconsistent comparator returns an error. | `src/adapter/abstract_serial_read.rs` | `searches_cover_empty_boundaries_context_seeds_and_inconsistent_comparators` | ✅ Success |
+| T-010 | RSF-FR-005 | Verify collecting an iterator propagates both per-item failures and iterator-creation failures. | Collection returns the original failure instead of silently truncating or succeeding. | `src/adapter/abstract_serial_read.rs` | `collecting_an_iterator_propagates_item_errors` | ✅ Success |
+| T-011 | RSF-FR-003, RSF-FR-011 | Verify a search against a sparse map-backed reader propagates a missing-record error. | The missing logical index is reported as an error, not as a search miss. | `src/adapter/abstract_serial_read.rs` | `alternate_backend_search_propagates_missing_record_error` | ✅ Success |
+| T-012 | RSF-FR-011, RSF-FR-012, RSF-RS-007 | Verify search methods propagate backend read failures and undefined partial ordering, including context-aware and find-and-get operations. | Errors remain observable and are not converted into `None` or successful results. | `src/adapter/abstract_serial_read.rs` | `search_methods_propagate_backend_and_comparison_errors` | ✅ Success |
 
-**Executed results:** `cargo test --manifest-path rust_serial_file\Cargo.toml
-adapter::abstract_serial_read::tests` passed all 7 reader tests. The full
-`cargo test --manifest-path rust_serial_file\Cargo.toml` run passed all 24
-tests, with 0 failures; doc-tests also passed (0 tests).
+**Executed results:** The focused coverage run passed all 12 reader tests. The
+full `cargo test --manifest-path rust_serial_file\Cargo.toml` run passed all
+21 currently enabled tests, with 0 failures; doc-tests also passed (0 tests).
 
 ### Acceptance criteria
 
@@ -304,11 +308,18 @@ tests, with 0 failures; doc-tests also passed (0 tests).
 
 ## Code coverage
 
-Coverage has not been measured. Test pass counts above are not coverage
-results.
-
-- **Coverage summary:** Not measured; no coverage tool or percentage was
-  recorded.
+- **Coverage tool:** `cargo-llvm-cov 0.9.1` with `llvm-tools-preview`.
+- **Command:** `cargo llvm-cov clean --manifest-path rust_serial_file\Cargo.toml`, followed by `cargo llvm-cov --manifest-path rust_serial_file\Cargo.toml --all-targets --ignore-filename-regex 'abstract_serial_write\.rs|serialized_struct' -- adapter::abstract_serial_read::tests`.
+- **Measured scope:** `rust_serial_file/src/adapter/abstract_serial_read.rs`
+  only; unrelated writer and serialization modules are excluded from the
+  report. All 12 reader tests passed.
+- **Reader coverage:** 99.02% of lines (704/711), 98.55% of regions
+  (949/963), and 100% of functions (64/64).
+- **Threshold:** None is currently specified.
+- **Remaining uncovered coverage:** 7 source lines and 14 regions. The
+  uncovered regions are in generic search monomorphizations; adding more
+  closure-based search cases creates additional monomorphizations and does
+  not improve the aggregate to 100%.
 
 ## Out of scope
 
