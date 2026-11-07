@@ -17,6 +17,8 @@
 - [Compatibility](#compatibility)
 - [Performance and resource use](#performance-and-resource-use)
 - [Phases](#phases)
+  - [Phase planning and reflection](#phase-planning-and-reflection)
+  - [Current implementation checklist](#current-implementation-checklist)
 - [Testing and acceptance criteria](#testing-and-acceptance-criteria)
 - [Code coverage](#code-coverage)
 - [Out of scope](#out-of-scope)
@@ -106,11 +108,38 @@ tests and acceptance criteria.
 
 ## Phases
 
-- [ ] Requirements clarified and accepted.
-- [ ] Design agreed, including relevant API and data structures.
-- [ ] Implementation completed.
-- [ ] Tests added and passing.
-- [ ] Documentation updated and changes reviewed.
+### Phase planning and reflection
+
+Plan phases for this project rather than using a fixed, universal sequence.
+Before implementation begins, describe how the work should be divided and
+consider dependencies, sequencing, risks, and completion criteria. Add, remove,
+split, merge, or reorder phases as the project requires. Revisit the plan as
+implementation progresses and record meaningful changes or lessons learned.
+
+| Phase ID | Phase and implementation steps | Dependencies | Completion criteria |
+|---|---|---|---|
+| P-001 | Describe the project-specific phase and the implementation steps it includes. | List prerequisite phases or `None`. | State measurable or verifiable conditions for completing this phase. |
+
+### Current implementation checklist
+
+Keep this checklist synchronized with the planned phases above. Add one item per
+phase and update its state as work progresses. Check the box only when the phase
+is complete; use the status label to distinguish phases that are not started,
+in progress, or blocked. Record blockers in the item.
+
+- [ ] P-001 — `{{PHASE_NAME}}` — Not started
+
+**Planning reflection (complete before implementation):**
+
+- Why is this phase breakdown appropriate for the project?
+- Are the phase order and dependencies clear, and can phases be implemented and verified independently where practical?
+- What risks, unknowns, or decisions could change the phase plan?
+
+**Implementation reflection (update as work progresses):**
+
+- Does the current plan still match the work and newly discovered constraints?
+- Should any phase be added, removed, split, merged, or reordered? Record the reason.
+- At phase completion, were its completion criteria met? Note deviations and lessons learned.
 
 ## Testing and acceptance criteria
 

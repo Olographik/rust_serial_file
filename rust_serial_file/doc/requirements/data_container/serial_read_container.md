@@ -244,34 +244,36 @@ observable collection semantics.
 
 ## Phases
 
-- [ ] Requirements clarified and accepted.
-- [ ] Design agreed, including `anyhow::Result` error classification,
+- [x] Requirements clarified and accepted.
+- [x] Design agreed, including `anyhow::Result` error classification,
   iterator behavior, search signatures and helpers, metadata availability,
   and trait composition.
-- [ ] Implementation completed.
-- [ ] Tests added and passing.
+- [x] Implementation completed.
+- [x] Tests added and passing.
 - [ ] Documentation updated and changes reviewed.
 
 ## Testing and acceptance criteria
 
 ### Tests
 
-The test paths and names below are proposed placeholders; update them to the
-chosen implementation and test layout before implementation is considered
-complete. Status remains **⏳ Not run** because this document does not
-implement or execute the reader.
+The table records tests implemented in `src/adapter/abstract_serial_read.rs`.
+Tests are marked **✅ Success** only after execution; any outstanding tests
+remain **⏳ Not run**.
 
 | Test ID | Requirement IDs | Description of the test | Success requirements | Test file | Test name | Status |
 |---|---|---|---|---|---|---|
-| T-001 | RSF-FR-001, RSF-FR-002, RSF-FR-003 | Verify a generic caller can use the indexed read operation through `SerialDataReader<T>`. | In-range lookup returns the expected owned record; out-of-range lookup returns a not-found error distinct from backend failure. | `tests/serial_data_reader.rs` | `serial_get_reads_by_index` | ⏳ Not run |
-| T-002 | RSF-FR-004, RSF-FR-010 | Verify first and last reads for non-empty and empty collections. | Endpoints return owned records or a not-found error for an empty collection. | `tests/serial_data_reader.rs` | `serial_endpoints_handle_empty_and_nonempty_readers` | ⏳ Not run |
-| T-003 | RSF-FR-005, RSF-FR-009 | Verify iteration order and coverage. | Iteration visits every record exactly once in logical order and yields owned values. | `tests/serial_data_reader.rs` | `serial_iter_reads_records_in_order` | ⏳ Not run |
-| T-004 | RSF-FR-007, RSF-FR-008 | Verify reads that refill or advance backend state. | Buffer/cursor changes do not skip, duplicate, reorder, or change records across repeated reads. | `tests/serial_data_reader.rs` | `serial_reads_preserve_values_across_state_updates` | ⏳ Not run |
-| T-005 | RSF-FR-003, RSF-FR-005, RSF-FR-010 | Verify not-found conditions and backend failures, including errors during iteration. | The caller distinguishes not-found from backend errors; iterator failures are yielded as errors and are not reported as normal completion. | `tests/serial_data_reader.rs` | `serial_reads_report_backend_errors` | ⏳ Not run |
-| T-006 | RSF-FR-006, RSF-RS-008 | Verify logical length and empty state are available without backend reads. | Both methods return correct values for empty and non-empty readers and perform no fallible backend I/O. | `tests/serial_data_reader.rs` | `serial_length_and_empty_state_are_infallible` | ⏳ Not run |
-| T-007 | RSF-FR-011, RSF-FR-013, RSF-RS-006, RSF-RS-007 | Verify value, key, and comparator searches on ordered records, including incomparable values. | Search returns the matching index or `None`, reports backend/comparison failures, and does not panic for undefined partial ordering. | `tests/serial_data_reader.rs` | `serial_find_supports_values_keys_and_comparators` | ⏳ Not run |
-| T-008 | RSF-FR-012 | Verify context-aware searches and `serial_find_and_get`. | Context is accepted and updated by contextual searches; find-and-get distinguishes no match, a found value, and search/read failure using its documented return shape. | `tests/serial_data_reader.rs` | `serial_find_context_and_find_and_get_report_results` | ⏳ Not run |
-| T-009 | RSF-FR-001, RSF-FR-002, RSF-FR-005, RSF-FR-006 | Verify representative in-memory and persistent backends can implement the shared interface. | Generic read code works without relying on backend-specific method names. | `tests/serial_data_reader.rs` | `serial_reader_supports_multiple_backends` | ⏳ Not run |
+| T-001 | RSF-FR-001, RSF-FR-002, RSF-FR-003, RSF-FR-004, RSF-FR-005, RSF-FR-006, RSF-FR-010, RSF-RS-008 | Verify `Vec<T>` provides owned indexed, endpoint, and iteration reads, infallible length/empty queries, and not-found errors. | Reads return the expected cloned values in order; an invalid index and empty first read report the corresponding typed errors. | `src/adapter/abstract_serial_read.rs` | `vector_reader_returns_owned_records_and_reports_invalid_indices` | ✅ Success |
+| T-002 | RSF-FR-011, RSF-FR-012, RSF-FR-013, RSF-RS-006 | Verify value, key, and comparator searches, a key search with context, and both value/key find-and-get operations. | Matching searches return the expected index or value; missing keys return `None`; context is updated to the found index. | `src/adapter/abstract_serial_read.rs` | `reader_searches_by_value_key_and_comparator` | ✅ Success |
+| T-003 | RSF-RS-007 | Verify key search reports undefined `PartialOrd` ordering. | Searching values containing `NaN` returns the typed `UndefinedOrdering` error rather than panicking. | `src/adapter/abstract_serial_read.rs` | `undefined_partial_ordering_is_reported` | ✅ Success |
+| T-004 | RSF-FR-007, RSF-FR-008, RSF-FR-009 | Verify reads and iteration across backend buffer state changes. | Refills do not change values, skip records, duplicate records, or reorder iteration. | `src/adapter/abstract_serial_read.rs` | `buffered_reads_preserve_records_across_refills_and_iteration` | ✅ Success |
+| T-005 | RSF-FR-003, RSF-FR-005, RSF-FR-011, RSF-FR-012 | Verify backend failures during indexed reads, searches, iterator creation, and per-item iteration. | Each failure remains observable as an error and is not converted into not-found or normal iteration completion. | `src/adapter/abstract_serial_read.rs` | `backend_read_and_iterator_errors_remain_observable` | ✅ Success |
+| T-006 | RSF-FR-012 | Verify context-aware searches and find-and-get found, no-match, and error outcomes. | Context-aware methods return the expected result and context; find-and-get returns `Ok(Some(value))`, `Ok(None)`, or `Err` as appropriate. | `src/adapter/abstract_serial_read.rs` | `context_search_and_find_and_get_report_all_outcomes` | ✅ Success |
+| T-007 | RSF-FR-001, RSF-FR-002, RSF-FR-005, RSF-FR-006 | Verify an alternate map-backed reader implements the shared contract through a generic caller. | Generic read code works without relying on backend-specific method names and reads records in logical order. | `src/adapter/abstract_serial_read.rs` | `generic_read_client_supports_an_alternate_backend` | ✅ Success |
+
+**Executed results:** `cargo test --manifest-path rust_serial_file\Cargo.toml
+adapter::abstract_serial_read::tests` passed all 7 reader tests. The full
+`cargo test --manifest-path rust_serial_file\Cargo.toml` run passed all 24
+tests, with 0 failures; doc-tests also passed (0 tests).
 
 ### Acceptance criteria
 
@@ -287,25 +289,26 @@ implement or execute the reader.
 5. Length and empty-state queries are infallible and rely only on metadata
    available to the reader without fallible backend I/O.
 6. Default value, key, and comparator searches use binary search, support
-    `SearchContext`, and propagate backend and comparison failures.
+   `SearchContext`, and propagate backend and comparison failures.
 7. Binary-search operations document and rely on the collection's relevant
-    sorted-order precondition without mutating records.
+   sorted-order precondition without mutating records.
 8. `serial_find_and_get` distinguishes no match, a successfully read record,
     and search/read failure according to its `anyhow::Result<Option<T>>`
     return shape.
 9. Tests verify the required behavior for both a non-stateful in-memory
-    backend and a stateful buffered or cursor-based backend.
+    backend and a stateful buffered or cursor-based backend. The current tests
+    cover the in-memory vector, a buffered reader double, and an alternate
+    map-backed reader.
 10. Existing `SerialDataContainer<T>` behavior remains unchanged unless
     changes are separately agreed and documented.
 
 ## Code coverage
 
-Coverage results shall be recorded after implementation and testing. This
-document does not claim coverage results.
+Coverage has not been measured. Test pass counts above are not coverage
+results.
 
-- **Coverage summary:** Add the coverage tool, measured scope, percentage,
-  threshold, and relevant uncovered areas here, or link a checked-in coverage
-  summary file.
+- **Coverage summary:** Not measured; no coverage tool or percentage was
+  recorded.
 
 ## Out of scope
 

@@ -1,0 +1,626 @@
+use std::{cmp::Ordering, error::Error, fmt};
+
+use anyhow::{Result, anyhow};
+use utils::search::search_type::{SearchContext, SearchIndexes};
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum SerialDataReaderError {
+    IndexOutOfBounds { index: usize, len: usize },
+    EmptyCollection,
+    UndefinedOrdering,
+}
+
+impl fmt::Display for SerialDataReaderError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::IndexOutOfBounds { index, len } => {
+                write!(
+                    formatter,
+                    "index {index} is out of bounds for collection of length {len}"
+                )
+            }
+            Self::EmptyCollection => write!(formatter, "collection is empty"),
+            Self::UndefinedOrdering => write!(formatter, "values do not have a defined ordering"),
+        }
+    }
+}
+
+impl Error for SerialDataReaderError {}
+
+pub trait SerialDataReader<T> {
+    type Iter<'a>: Iterator<Item = Result<T>>
+    where
+        Self: 'a,
+        T: 'a;
+
+    fn serial_len(&self) -> usize;
+
+    fn serial_is_empty(&self) -> bool {
+        self.serial_len() == 0
+    }
+
+    fn serial_get(&mut self, index: usize) -> Result<T>;
+
+    fn serial_first(&mut self) -> Result<T> {
+        if self.serial_is_empty() {
+            return Err(SerialDataReaderError::EmptyCollection.into());
+        }
+        self.serial_get(0)
+    }
+
+    fn serial_last(&mut self) -> Result<T> {
+        let len = self.serial_len();
+        if len == 0 {
+            return Err(SerialDataReaderError::EmptyCollection.into());
+        }
+        self.serial_get(len - 1)
+    }
+
+    fn serial_iter(&mut self) -> Result<Self::Iter<'_>>;
+
+    fn serial_find(&mut self, value: &T) -> Result<Option<usize>>
+    where
+        T: PartialOrd<T>,
+    {
+        self.serial_find_by(value)
+    }
+
+    fn serial_find_by<K>(&mut self, key: &K) -> Result<Option<usize>>
+    where
+        T: PartialOrd<K>,
+    {
+        let len = self.serial_len();
+        let search = fallible_dicotomic_search(len, None, |index| {
+            let record = self.serial_get(index)?;
+            record
+                .partial_cmp(key)
+                .ok_or_else(|| SerialDataReaderError::UndefinedOrdering.into())
+        })?;
+        Ok(search.exact)
+    }
+
+    fn serial_find_by_ordering<F>(&mut self, mut comparator: F) -> Result<Option<usize>>
+    where
+        F: FnMut(&T) -> Ordering,
+    {
+        let len = self.serial_len();
+        let search = fallible_dicotomic_search(len, None, |index| {
+            let record = self.serial_get(index)?;
+            Ok(comparator(&record))
+        })?;
+        Ok(search.exact)
+    }
+
+    fn serial_find_with_context(
+        &mut self,
+        value: &T,
+        context: &mut SearchContext,
+    ) -> Result<Option<usize>>
+    where
+        T: PartialOrd<T>,
+    {
+        self.serial_find_by_with_context(value, context)
+    }
+
+    fn serial_find_by_with_context<K>(
+        &mut self,
+        key: &K,
+        context: &mut SearchContext,
+    ) -> Result<Option<usize>>
+    where
+        T: PartialOrd<K>,
+    {
+        let len = self.serial_len();
+        let search = fallible_dicotomic_search(len, Some(context), |index| {
+            let record = self.serial_get(index)?;
+            record
+                .partial_cmp(key)
+                .ok_or_else(|| SerialDataReaderError::UndefinedOrdering.into())
+        })?;
+        Ok(search.exact)
+    }
+
+    fn serial_find_by_ordering_with_context<F>(
+        &mut self,
+        mut comparator: F,
+        context: &mut SearchContext,
+    ) -> Result<Option<usize>>
+    where
+        F: FnMut(&T) -> Ordering,
+    {
+        let len = self.serial_len();
+        let search = fallible_dicotomic_search(len, Some(context), |index| {
+            let record = self.serial_get(index)?;
+            Ok(comparator(&record))
+        })?;
+        Ok(search.exact)
+    }
+
+    fn serial_find_and_get(&mut self, value: &T) -> Result<Option<T>>
+    where
+        T: PartialOrd<T>,
+    {
+        self.serial_find(value)?
+            .map(|index| self.serial_get(index))
+            .transpose()
+    }
+
+    fn serial_find_by_and_get<K>(&mut self, key: &K) -> Result<Option<T>>
+    where
+        T: PartialOrd<K>,
+    {
+        self.serial_find_by(key)?
+            .map(|index| self.serial_get(index))
+            .transpose()
+    }
+}
+
+fn fallible_dicotomic_search<F>(
+    size: usize,
+    mut context: Option<&mut SearchContext>,
+    mut compare_at: F,
+) -> Result<SearchIndexes>
+where
+    F: FnMut(usize) -> Result<Ordering>,
+{
+    if size == 0 {
+        return Ok(SearchIndexes::none());
+    }
+
+    let mut lower = 0;
+    let mut upper = size;
+
+    if let Some(search_context) = context.as_deref_mut() {
+        if let Some(index) = search_context.0.filter(|index| *index < size) {
+            match compare_at(index)? {
+                Ordering::Less => lower = index + 1,
+                Ordering::Equal => return Ok(SearchIndexes::from_exact_point(index, size)),
+                Ordering::Greater => upper = index,
+            }
+        }
+    }
+
+    while lower < upper {
+        let middle = lower + (upper - lower) / 2;
+        match compare_at(middle)? {
+            Ordering::Less => lower = middle + 1,
+            Ordering::Equal | Ordering::Greater => upper = middle,
+        }
+    }
+
+    let result = if lower == size {
+        SearchIndexes::from_before_point(size - 1, size)
+    } else {
+        match compare_at(lower)? {
+            Ordering::Equal => SearchIndexes::from_exact_point(lower, size),
+            Ordering::Less => {
+                return Err(anyhow!(
+                    "binary-search comparator returned inconsistent ordering"
+                ));
+            }
+            Ordering::Greater if lower == 0 => SearchIndexes::from_after_point(0),
+            Ordering::Greater => SearchIndexes {
+                before: Some(lower - 1),
+                exact: None,
+                after: Some(lower),
+            },
+        }
+    };
+
+    if let Some(search_context) = context {
+        search_context.update_context(&result);
+    }
+
+    Ok(result)
+}
+
+fn clone_to_result<T: Clone>(value: &T) -> Result<T> {
+    Ok(value.clone())
+}
+
+impl<T: Clone> SerialDataReader<T> for Vec<T> {
+    type Iter<'a>
+        = std::iter::Map<std::slice::Iter<'a, T>, fn(&'a T) -> Result<T>>
+    where
+        T: 'a;
+
+    fn serial_len(&self) -> usize {
+        Vec::len(self)
+    }
+
+    fn serial_get(&mut self, index: usize) -> Result<T> {
+        self.as_slice().get(index).cloned().ok_or_else(|| {
+            SerialDataReaderError::IndexOutOfBounds {
+                index,
+                len: Vec::len(self),
+            }
+            .into()
+        })
+    }
+
+    fn serial_iter(&mut self) -> Result<Self::Iter<'_>> {
+        Ok(self.iter().map(clone_to_result::<T>))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use super::{SerialDataReader, SerialDataReaderError};
+    use anyhow::{Result, anyhow};
+    use utils::search::search_type::SearchContext;
+
+    struct BufferedReader {
+        records: Vec<i32>,
+        buffer: Vec<i32>,
+        buffer_start: usize,
+        buffer_capacity: usize,
+        read_count: usize,
+        fail_read_at: Option<usize>,
+        fail_read_on_call: Option<usize>,
+        fail_iterator_creation: bool,
+        iterator_error_at: Option<usize>,
+    }
+
+    impl BufferedReader {
+        fn new(records: Vec<i32>, buffer_capacity: usize) -> Self {
+            Self {
+                records,
+                buffer: Vec::new(),
+                buffer_start: 0,
+                buffer_capacity,
+                read_count: 0,
+                fail_read_at: None,
+                fail_read_on_call: None,
+                fail_iterator_creation: false,
+                iterator_error_at: None,
+            }
+        }
+    }
+
+    struct BufferedIter<'a> {
+        reader: &'a mut BufferedReader,
+        index: usize,
+        len: usize,
+    }
+
+    impl Iterator for BufferedIter<'_> {
+        type Item = Result<i32>;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            if self.index == self.len {
+                return None;
+            }
+
+            let index = self.index;
+            self.index += 1;
+            if self.reader.iterator_error_at == Some(index) {
+                return Some(Err(anyhow!("injected iteration error at index {index}")));
+            }
+            Some(self.reader.serial_get(index))
+        }
+    }
+
+    impl SerialDataReader<i32> for BufferedReader {
+        type Iter<'a> = BufferedIter<'a>;
+
+        fn serial_len(&self) -> usize {
+            self.records.len()
+        }
+
+        fn serial_get(&mut self, index: usize) -> Result<i32> {
+            let read_number = self.read_count;
+            self.read_count += 1;
+            if self.fail_read_at == Some(index) {
+                return Err(anyhow!("injected read error at index {index}"));
+            }
+            if self.fail_read_on_call == Some(read_number) {
+                return Err(anyhow!("injected read error on call {read_number}"));
+            }
+
+            if index >= self.records.len() {
+                return Err(SerialDataReaderError::IndexOutOfBounds {
+                    index,
+                    len: self.records.len(),
+                }
+                .into());
+            }
+
+            let buffer_end = self.buffer_start + self.buffer.len();
+            if index < self.buffer_start || index >= buffer_end {
+                self.buffer_start = (index / self.buffer_capacity) * self.buffer_capacity;
+                let end = (self.buffer_start + self.buffer_capacity).min(self.records.len());
+                self.buffer = self.records[self.buffer_start..end].to_vec();
+            }
+
+            Ok(self.buffer[index - self.buffer_start])
+        }
+
+        fn serial_iter(&mut self) -> Result<Self::Iter<'_>> {
+            if self.fail_iterator_creation {
+                return Err(anyhow!("injected iterator creation error"));
+            }
+
+            let len = self.serial_len();
+            Ok(BufferedIter {
+                reader: self,
+                index: 0,
+                len,
+            })
+        }
+    }
+
+    struct MapReader {
+        records: BTreeMap<usize, i32>,
+    }
+
+    struct MapIter<'a> {
+        records: std::collections::btree_map::Values<'a, usize, i32>,
+    }
+
+    impl Iterator for MapIter<'_> {
+        type Item = Result<i32>;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            self.records.next().copied().map(Ok)
+        }
+    }
+
+    impl SerialDataReader<i32> for MapReader {
+        type Iter<'a> = MapIter<'a>;
+
+        fn serial_len(&self) -> usize {
+            self.records.len()
+        }
+
+        fn serial_get(&mut self, index: usize) -> Result<i32> {
+            self.records.get(&index).copied().ok_or_else(|| {
+                SerialDataReaderError::IndexOutOfBounds {
+                    index,
+                    len: self.records.len(),
+                }
+                .into()
+            })
+        }
+
+        fn serial_iter(&mut self) -> Result<Self::Iter<'_>> {
+            Ok(MapIter {
+                records: self.records.values(),
+            })
+        }
+    }
+
+    fn read_all<R: SerialDataReader<i32>>(reader: &mut R) -> Result<Vec<i32>> {
+        reader.serial_iter()?.collect()
+    }
+
+    #[test]
+    fn vector_reader_returns_owned_records_and_reports_invalid_indices() {
+        let mut values = vec![10, 20, 30];
+
+        assert_eq!(values.serial_len(), 3);
+        assert!(!values.serial_is_empty());
+        assert_eq!(values.serial_get(1).unwrap(), 20);
+        assert_eq!(values.serial_first().unwrap(), 10);
+        assert_eq!(values.serial_last().unwrap(), 30);
+        assert_eq!(
+            values
+                .serial_get(3)
+                .unwrap_err()
+                .downcast_ref::<SerialDataReaderError>(),
+            Some(&SerialDataReaderError::IndexOutOfBounds { index: 3, len: 3 })
+        );
+        assert_eq!(
+            values
+                .serial_iter()
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap(),
+            [10, 20, 30]
+        );
+
+        let mut empty: Vec<i32> = Vec::new();
+        assert!(empty.serial_is_empty());
+        assert_eq!(
+            empty
+                .serial_first()
+                .unwrap_err()
+                .downcast_ref::<SerialDataReaderError>(),
+            Some(&SerialDataReaderError::EmptyCollection)
+        );
+    }
+
+    #[test]
+    fn reader_searches_by_value_key_and_comparator() {
+        #[derive(Clone, Debug)]
+        struct Entry {
+            key: i32,
+            value: &'static str,
+        }
+
+        impl PartialEq for Entry {
+            fn eq(&self, other: &Self) -> bool {
+                self.key == other.key
+            }
+        }
+
+        impl PartialOrd for Entry {
+            fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+                self.key.partial_cmp(&other.key)
+            }
+        }
+
+        impl PartialOrd<i32> for Entry {
+            fn partial_cmp(&self, other: &i32) -> Option<std::cmp::Ordering> {
+                self.key.partial_cmp(other)
+            }
+        }
+
+        impl PartialEq<i32> for Entry {
+            fn eq(&self, other: &i32) -> bool {
+                self.key == *other
+            }
+        }
+
+        let mut entries = vec![
+            Entry {
+                key: 10,
+                value: "ten",
+            },
+            Entry {
+                key: 20,
+                value: "twenty",
+            },
+            Entry {
+                key: 30,
+                value: "thirty",
+            },
+        ];
+        let target = Entry {
+            key: 20,
+            value: "query",
+        };
+        assert_eq!(entries.serial_find(&target).unwrap(), Some(1));
+        assert_eq!(entries.serial_find_by(&30).unwrap(), Some(2));
+        assert_eq!(
+            entries
+                .serial_find_by_ordering(|entry| entry.key.cmp(&10))
+                .unwrap(),
+            Some(0)
+        );
+        assert_eq!(entries.serial_find_by(&25).unwrap(), None);
+        assert_eq!(
+            entries.serial_find_by_and_get(&20).unwrap().unwrap().value,
+            "twenty"
+        );
+        assert_eq!(
+            entries.serial_find_and_get(&target).unwrap().unwrap().value,
+            "twenty"
+        );
+
+        let mut context = SearchContext::none();
+        assert_eq!(
+            entries
+                .serial_find_by_with_context(&30, &mut context)
+                .unwrap(),
+            Some(2)
+        );
+        assert_eq!(context, SearchContext::of(2));
+    }
+
+    #[test]
+    fn undefined_partial_ordering_is_reported() {
+        let mut values = vec![1.0_f64, f64::NAN, 3.0];
+        let error = values.serial_find_by(&2.0).unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<SerialDataReaderError>(),
+            Some(&SerialDataReaderError::UndefinedOrdering)
+        );
+    }
+
+    #[test]
+    fn buffered_reads_preserve_records_across_refills_and_iteration() {
+        let mut reader = BufferedReader::new(vec![10, 20, 30, 40, 50], 2);
+
+        assert_eq!(reader.serial_get(3).unwrap(), 40);
+        assert_eq!(reader.buffer_start, 2);
+        assert_eq!(reader.serial_get(0).unwrap(), 10);
+        assert_eq!(reader.buffer_start, 0);
+        assert_eq!(reader.serial_get(4).unwrap(), 50);
+        assert_eq!(reader.buffer_start, 4);
+        assert_eq!(reader.serial_get(3).unwrap(), 40);
+
+        let values = reader
+            .serial_iter()
+            .unwrap()
+            .collect::<Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(values, [10, 20, 30, 40, 50]);
+        assert_eq!(read_all(&mut reader).unwrap(), [10, 20, 30, 40, 50]);
+    }
+
+    #[test]
+    fn backend_read_and_iterator_errors_remain_observable() {
+        let mut reader = BufferedReader::new(vec![10, 20, 30], 2);
+        reader.fail_read_at = Some(1);
+        assert!(
+            reader
+                .serial_get(1)
+                .unwrap_err()
+                .to_string()
+                .contains("read error")
+        );
+        assert!(
+            reader
+                .serial_find_by(&20)
+                .unwrap_err()
+                .to_string()
+                .contains("read error")
+        );
+
+        reader.fail_read_at = None;
+        reader.fail_iterator_creation = true;
+        assert!(
+            reader
+                .serial_iter()
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("iterator creation error")
+        );
+
+        reader.fail_iterator_creation = false;
+        reader.iterator_error_at = Some(1);
+        let mut iter = reader.serial_iter().unwrap();
+        assert_eq!(iter.next().unwrap().unwrap(), 10);
+        assert!(
+            iter.next()
+                .unwrap()
+                .unwrap_err()
+                .to_string()
+                .contains("iteration error")
+        );
+        assert_eq!(iter.next().unwrap().unwrap(), 30);
+        assert!(iter.next().is_none());
+    }
+
+    #[test]
+    fn context_search_and_find_and_get_report_all_outcomes() {
+        let mut reader = BufferedReader::new(vec![10, 20, 30], 2);
+
+        let mut context = SearchContext::none();
+        assert_eq!(
+            reader.serial_find_with_context(&20, &mut context).unwrap(),
+            Some(1)
+        );
+        assert_eq!(context, SearchContext::of(1));
+
+        let mut context = SearchContext::none();
+        assert_eq!(
+            reader
+                .serial_find_by_ordering_with_context(|record| record.cmp(&30), &mut context,)
+                .unwrap(),
+            Some(2)
+        );
+        assert_eq!(context, SearchContext::of(2));
+
+        assert_eq!(reader.serial_find_and_get(&20).unwrap(), Some(20));
+        assert_eq!(reader.serial_find_by_and_get(&25).unwrap(), None);
+
+        reader.fail_read_on_call = Some(reader.read_count + 3);
+        let error = reader.serial_find_and_get(&20).unwrap_err();
+        assert!(error.to_string().contains("read error"));
+    }
+
+    #[test]
+    fn generic_read_client_supports_an_alternate_backend() {
+        let mut reader = MapReader {
+            records: [(0, 7), (1, 14), (2, 21)].into_iter().collect(),
+        };
+
+        assert_eq!(read_all(&mut reader).unwrap(), [7, 14, 21]);
+        assert_eq!(reader.serial_get(1).unwrap(), 14);
+        assert_eq!(reader.serial_find(&21).unwrap(), Some(2));
+    }
+}
