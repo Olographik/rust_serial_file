@@ -255,13 +255,13 @@ where
     let mut lower = 0;
     let mut upper = size;
 
-    if let Some(search_context) = context.as_deref_mut() {
-        if let Some(index) = search_context.0.filter(|index| *index < size) {
-            match compare_at(index)? {
-                Ordering::Less => lower = index + 1,
-                Ordering::Equal => return Ok(SearchIndexes::from_exact_point(index, size)),
-                Ordering::Greater => upper = index,
-            }
+    if let Some(search_context) = context.as_deref_mut()
+        && let Some(index) = search_context.0.filter(|index| *index < size)
+    {
+        match compare_at(index)? {
+            Ordering::Less => lower = index + 1,
+            Ordering::Equal => return Ok(SearchIndexes::from_exact_point(index, size)),
+            Ordering::Greater => upper = index,
         }
     }
 

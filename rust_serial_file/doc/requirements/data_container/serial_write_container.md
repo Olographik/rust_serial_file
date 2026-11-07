@@ -200,10 +200,10 @@ pub trait SerialDataWriter<T> {
 
 ### Current implementation checklist
 
-- [ ] P-001 — `Finalize writer API and error semantics` — Not started
-- [ ] P-002 — `Implement writer contract tests` — Not started
-- [ ] P-003 — `Implement writer for Vec<T>` — Not started
-- [ ] P-004 — `Validate tests and implementation` — Not started
+- [x] P-001 — `Finalize writer API and error semantics` — Complete
+- [x] P-002 — `Implement writer contract tests` — Complete
+- [x] P-003 — `Implement writer for Vec<T>` — Complete
+- [ ] P-004 — `Validate tests and implementation` — In progress; tests and formatting pass, but Clippy is blocked by existing diagnostics in unrelated files.
 
 **Planning reflection (complete before implementation):**
 
@@ -224,11 +224,15 @@ pub trait SerialDataWriter<T> {
 
 **Implementation reflection (update as work progresses):**
 
-- Does the current plan still match the work and newly discovered constraints?
-- Should any phase be added, removed, split, merged, or reordered? Record the
-  reason.
-- At phase completion, were its completion criteria met? Note deviations and
-  lessons learned.
+- The plan remains appropriate. The trait contract, contract tests, and
+  `Vec<T>` implementation are complete; the simulated writer verifies that
+  backend errors remain observable.
+- P-004's tests and formatting criteria passed. The full crate test suite
+  passed, but Clippy with warnings denied reported existing diagnostics in
+  unrelated files, so the phase remains in progress until those checks can be
+  validated without changing unrelated code.
+- The focused writer tests and full crate suite passed; formatting passed.
+  Coverage has not been measured.
 
 ## Testing and acceptance criteria
 
@@ -236,14 +240,14 @@ pub trait SerialDataWriter<T> {
 
 | Test ID | Requirement IDs | Description of the test | Success requirements | Test file | Test name | Status |
 |---|---|---|---|---|---|---|
-| T-001 | `RSF-FR-001`, `RSF-FR-002`, `RSF-RS-004`, `RSF-RS-005` | Verify a generic `SerialDataWriter<T>` caller can use the trait with a `Vec<T>` whose element type is not `Clone`. | Trait calls compile and mutate the vector as specified without a `Clone` bound. | `rust_serial_file/src/adapter/abstract_data_container.rs` or the writer implementation test module | To be assigned | ⏳ Not run |
-| T-002 | `RSF-FR-003`, `RSF-FR-009` | Append a record to an empty and a non-empty collection. | Each call returns `Ok(())` and the value appears at the end in logical order. | Writer implementation test module | To be assigned | ⏳ Not run |
-| T-003 | `RSF-FR-004`, `RSF-FR-011` | Insert at the start, middle, and end; attempt an index greater than the length. | Valid inserts produce the expected order; the invalid index returns `Err` and does not change the collection. | Writer implementation test module | To be assigned | ⏳ Not run |
-| T-004 | `RSF-FR-005`, `RSF-FR-011` | Replace existing records and attempt replacement at an out-of-range index. | A valid replacement changes only the target record; an invalid index returns `Err` and leaves the collection unchanged. | Writer implementation test module | To be assigned | ⏳ Not run |
-| T-005 | `RSF-FR-006`, `RSF-RS-001`, `RSF-RS-003` | Remove the first, middle, and last record with `serial_remove`; attempt removal from an invalid index. | Valid calls return `Ok(())` and remove the selected record; invalid removal returns `Err` without mutation. | Writer implementation test module | To be assigned | ⏳ Not run |
-| T-008 | `RSF-FR-012`, `RSF-RS-001`, `RSF-RS-003` | Remove the first, middle, and last record with `serial_remove_get`; attempt removal from an invalid index. | Valid calls return the removed value and preserve remaining order; invalid removal returns `Err` without mutation. | Writer implementation test module | To be assigned | ⏳ Not run |
-| T-006 | `RSF-FR-007`, `RSF-FR-008` | Clear empty and non-empty collections; truncate to zero, a smaller length, and a length at least as large as the current length. | Collection contents match the specified semantics and no-op cases succeed. | Writer implementation test module | To be assigned | ⏳ Not run |
-| T-007 | `RSF-FR-010`, `RSF-DS-004` | Use a simulated backend to produce a write or persistence failure. | The method returns `Err`; the test verifies the simulated backend's documented partial-failure or rollback behavior. | Writer contract test module | To be assigned | ⏳ Not run |
+| T-001 | `RSF-FR-001`, `RSF-FR-002`, `RSF-RS-004`, `RSF-RS-005` | Verify a generic `SerialDataWriter<T>` caller can use the trait with a `Vec<T>` whose element type is not `Clone`. | Trait calls compile and mutate the vector as specified without a `Clone` bound. | `rust_serial_file/src/adapter/abstract_serial_write.rs` | `writer_works_with_non_clone_records` | ✅ Success |
+| T-002 | `RSF-FR-003`, `RSF-FR-009` | Append a record to an empty and a non-empty collection. | Each call returns `Ok(())` and the value appears at the end in logical order. | `rust_serial_file/src/adapter/abstract_serial_write.rs` | `serial_write_appends_to_empty_and_non_empty_vectors` | ✅ Success |
+| T-003 | `RSF-FR-004`, `RSF-FR-011` | Insert at the start, middle, and end; attempt an index greater than the length. | Valid inserts produce the expected order; the invalid index returns `Err` and does not change the collection. | `rust_serial_file/src/adapter/abstract_serial_write.rs` | `serial_insert_handles_boundaries_and_rejects_out_of_range_indices` | ✅ Success |
+| T-004 | `RSF-FR-005`, `RSF-FR-011` | Replace existing records and attempt replacement at an out-of-range index. | A valid replacement changes only the target record; an invalid index returns `Err` and leaves the collection unchanged. | `rust_serial_file/src/adapter/abstract_serial_write.rs` | `serial_write_at_replaces_existing_record_and_rejects_invalid_index` | ✅ Success |
+| T-005 | `RSF-FR-006`, `RSF-RS-001`, `RSF-RS-003` | Remove the first, middle, and last record with `serial_remove`; attempt removal from an invalid index. | Valid calls return `Ok(())` and remove the selected record; invalid removal returns `Err` without mutation. | `rust_serial_file/src/adapter/abstract_serial_write.rs` | `serial_remove_removes_without_returning_value` | ✅ Success |
+| T-008 | `RSF-FR-012`, `RSF-RS-001`, `RSF-RS-003` | Remove the first, middle, and last record with `serial_remove_get`; attempt removal from an invalid index. | Valid calls return the removed value and preserve remaining order; invalid removal returns `Err` without mutation. | `rust_serial_file/src/adapter/abstract_serial_write.rs` | `serial_remove_get_returns_removed_value` | ✅ Success |
+| T-006 | `RSF-FR-007`, `RSF-FR-008` | Clear empty and non-empty collections; truncate to zero, a smaller length, and a length at least as large as the current length. | Collection contents match the specified semantics and no-op cases succeed. | `rust_serial_file/src/adapter/abstract_serial_write.rs` | `serial_clear_and_truncate_follow_collection_semantics` | ✅ Success |
+| T-007 | `RSF-FR-010`, `RSF-DS-004` | Use a simulated backend to produce a write or persistence failure. | The method returns `Err`; the test verifies the simulated backend's documented partial-failure or rollback behavior. | `rust_serial_file/src/adapter/abstract_serial_write.rs` | `backend_write_failures_are_returned_to_the_caller` | ✅ Success |
 
 ### Acceptance criteria
 
