@@ -386,6 +386,26 @@ fn serial_remove_preserves_remaining_order() {
 }
 
 #[test]
+fn rejects_out_of_range_replace_and_remove_get_without_mutation() {
+    let records = [record(1), record(2)];
+    let initial_bytes = encoded(&records);
+    let (_directory, path, mut file) = struct_file(&initial_bytes);
+
+    assert!(file.write_value_at(file.serial_len(), &record(3)).is_err());
+    assert!(file.serial_remove_get(file.serial_len()).is_err());
+
+    assert_eq!(file.serial_len(), records.len());
+    assert_eq!(
+        file.serial_iter()
+            .unwrap()
+            .map(Result::unwrap)
+            .collect::<Vec<_>>(),
+        records
+    );
+    assert_eq!(read_file(&path), initial_bytes);
+}
+
+#[test]
 fn serial_remove_shifts_rows_across_multiple_chunks() {
     let records = (0..8_195).map(record).collect::<Vec<_>>();
     let (_directory, _path, mut file) = struct_file(&encoded(&records));

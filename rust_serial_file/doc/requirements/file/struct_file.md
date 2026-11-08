@@ -354,6 +354,7 @@ Use **⏳ Not run** until a test has been executed, then set its status to
 | T-022 | `RSF-SF-DS-004` | Read a row larger than the fixed stack buffer. | The larger row is read and decoded correctly using the fallible allocation path. | `rust_serial_file/tests/struct_file.rs` | `reads_rows_larger_than_the_stack_buffer` | ✅ Success |
 | T-023 | `RSF-SF-FR-005`, `RSF-SF-RS-002` | Iterate more rows than fit in the BufferedReader cache. | All rows are decoded in order across cache-window boundaries. | `rust_serial_file/tests/struct_file.rs` | `iterator_reads_across_buffer_cache_windows` | ✅ Success |
 | T-024 | `RSF-SF-FR-006`, `RSF-SF-RS-006` | Replace, append, and insert a record larger than the stack buffer. | Large-record writes use the fallible allocation path and preserve row order and values. | `rust_serial_file/tests/struct_file.rs` | `writes_rows_larger_than_the_stack_buffer` | ✅ Success |
+| T-025 | `RSF-SF-FR-004`, `RSF-SF-FR-006`, `RSF-SF-FR-009` | Replace and remove-and-return at the current collection length. | Both methods return errors without changing row bytes or logical length. | `rust_serial_file/tests/struct_file.rs` | `rejects_out_of_range_replace_and_remove_get_without_mutation` | ✅ Success |
 
 ### Acceptance criteria
 
