@@ -2,7 +2,7 @@
 
 - **Date:** 2026-11-08
 - **Author:** `Olographik`
-- **Revision:** 0.7
+- **Revision:** 0.8
 - **Short description:** Define a non-generic owned-file wrapper for metadata and unbuffered fixed-size row operations.
 
 ## Table of contents
@@ -39,8 +39,10 @@ individual rows or contiguous blocks of rows using caller-provided buffers.
 It can also append a row or insert one before an existing row, shifting later
 row data to preserve its order, and reserve storage for a requested number of
 rows.
-It takes ownership of a `File`; callers are responsible for any additional
-handles, cloning, or coordination needed for concurrent access.
+It takes ownership of a `File`. Read operations use cursor-independent
+positioned reads and shared references, allowing concurrent readers. The
+wrapper does not provide synchronization; callers must coordinate writes and
+structural mutations exclusively.
 
 ## Goals and scope
 
@@ -66,6 +68,8 @@ handles, cloning, or coordination needed for concurrent access.
   without increasing the current instance's logical row count.
 - Iterate read-only over all rows or a selected row range using a
   caller-provided reusable buffer.
+- Allow read-only operations to run concurrently without changing or sharing
+  the file cursor.
 - Provide conventional Rust iterator APIs for all rows and selected ranges,
   yielding fallible owned row values.
 
@@ -76,8 +80,8 @@ handles, cloning, or coordination needed for concurrent access.
   an existing one.
 - Define the meaning of the element size and data offset, including boundary
   behavior.
-- Define ownership of the file handle and leave any additional handles or
-  concurrency coordination to the caller.
+- Define ownership of the file handle, concurrent read behavior, and the
+  caller's responsibility to coordinate writes and additional handles.
 - Define raw metadata access, metadata resizing, row truncation, unbuffered
   single-row and block row I/O, append, insertion, and row-capacity reservation.
 - Define allocation-free read-only iteration over the full row set and a
@@ -86,7 +90,7 @@ handles, cloning, or coordination needed for concurrent access.
   their owned-item allocation and error semantics.
 - Use the legacy `FileReference` only as behavioral inspiration; this
   requirement does not re-enable or preserve its generic API.
-- Do not specify element serialization or file protection.
+- Do not specify element serialization or provide a read/write lock.
 
 ## Assumptions and dependencies
 
@@ -98,6 +102,9 @@ handles, cloning, or coordination needed for concurrent access.
   responsibility.
 - The wrapper is not generic over a record type. Element width is supplied as
   a nonzero runtime value.
+- Positioned reads are available on Unix and Windows and do not modify the
+  shared file cursor. The wrapper does not provide synchronization for writes
+  or structural mutations.
 - The data offset is a byte offset from the beginning of the file. Bytes
   before it are the raw metadata region; its value is therefore the metadata
   byte length and the start offset of the row region.
@@ -174,8 +181,8 @@ handles, cloning, or coordination needed for concurrent access.
 | `RSF-FILE-RS-002` | The wrapper shall own a concrete `std::fs::File`. Handle-based construction shall take `File` by value; path-based construction shall store the opened or created `File` directly.                                          |
 | `RSF-FILE-RS-003` | The wrapper shall reject a zero element size at construction.                                                                                                                                                               |
 | `RSF-FILE-RS-004` | File metadata queries shall return observable errors when the operating system cannot retrieve file metadata; they shall not substitute a length of zero.                                                                   |
-| `RSF-FILE-RS-005` | The wrapper shall not claim to synchronize concurrent file access or protect the file with a mutex or other locking mechanism.                                                                                              |
-| `RSF-FILE-RS-006` | `get_raw_metadata` and `read_row` shall fill caller-provided mutable slices and shall not allocate an output `Vec<u8>`. The buffer length shall exactly match the metadata length or configured element size, respectively. |
+| `RSF-FILE-RS-005` | The wrapper shall not provide a lock; callers synchronize writes and mutations, while positioned reads may run concurrently without sharing the file cursor.                                                                     |
+| `RSF-FILE-RS-006` | `get_raw_metadata` and row reads shall fill caller-provided mutable slices and shall not allocate an output `Vec<u8>`. The buffer length shall exactly match the metadata length or configured element size, respectively. |
 | `RSF-FILE-RS-007` | Row read/write methods shall perform direct, unbuffered row operations and shall not add a row buffer to the wrapper.                                                                                                       |
 | `RSF-FILE-RS-008` | Row write input shall be validated to have exactly `element_size` bytes; invalid row sizes and out-of-range row indices shall return errors.                                                                                |
 | `RSF-FILE-RS-009` | Both row truncation methods shall reject a requested retained row count greater than the current logical row count and shall not extend or pad the file.                                                                    |
@@ -187,6 +194,7 @@ handles, cloning, or coordination needed for concurrent access.
 | `RSF-FILE-RS-015` | `append_row` and `insert_row` shall accept a caller-provided slice of exactly `element_size` bytes; insertion shall not require the caller to provide or clone the rows being shifted.                                      |
 | `RSF-FILE-RS-016` | `write_row` shall remain replacement-only for complete existing rows. `write_rows` shall allow contiguous extension but reject a starting index beyond the logical end; non-empty writes shall ensure the metadata prefix exists before range validation. |
 | `RSF-FILE-RS-017` | `reserve_rows` shall use `File::set_len` to extend file length and shall not claim to guarantee physical disk-block allocation.                                                                                             |
+| `RSF-FILE-RS-018` | Metadata and row reads shall use cursor-independent positioned reads on Unix and Windows, so concurrent shared reads do not race on the file cursor.                                                                           |
 
 ## Public API
 
@@ -224,7 +232,7 @@ impl FileMetadata {
 
     pub fn element_size(&self) -> u64;
 
-    pub fn get_raw_metadata(&mut self, metadata: &mut [u8]) -> anyhow::Result<()>;
+    pub fn get_raw_metadata(&self, metadata: &mut [u8]) -> anyhow::Result<()>;
 
     pub fn update_raw_metadata(&mut self, metadata: &[u8]) -> anyhow::Result<()>;
 
@@ -232,11 +240,11 @@ impl FileMetadata {
 
     pub fn truncate_rows_front(&mut self, row_count: u64) -> anyhow::Result<()>;
 
-    pub fn read_row(&mut self, index: u64, data: &mut [u8]) -> anyhow::Result<()>;
+    pub fn read_row(&self, index: u64, data: &mut [u8]) -> anyhow::Result<()>;
 
     pub fn write_row(&mut self, index: u64, row: &[u8]) -> anyhow::Result<()>;
 
-    pub fn read_rows(&mut self, start: u64, data: &mut [u8]) -> anyhow::Result<()>;
+    pub fn read_rows(&self, start: u64, data: &mut [u8]) -> anyhow::Result<()>;
 
     pub fn write_rows(&mut self, start: u64, data: &[u8]) -> anyhow::Result<()>;
 
@@ -246,25 +254,25 @@ impl FileMetadata {
 
     pub fn reserve_rows(&mut self, new_count: u64) -> anyhow::Result<()>;
 
-    pub fn iter_rows(&mut self) -> anyhow::Result<FileRowIter<'_>>;
+    pub fn iter_rows(&self) -> anyhow::Result<FileRowIter<'_>>;
 
     pub fn iter_rows_range(
-        &mut self,
+        &self,
         start: u64,
         count: u64,
     ) -> anyhow::Result<FileRowIter<'_>>;
 
-    pub fn rows(&mut self) -> anyhow::Result<FileRows<'_>>;
+    pub fn rows(&self) -> anyhow::Result<FileRows<'_>>;
 
     pub fn rows_range(
-        &mut self,
+        &self,
         start: u64,
         count: u64,
     ) -> anyhow::Result<FileRows<'_>>;
 }
 
 pub struct FileRowIter<'a> {
-    // Opaque iterator state borrowing FileMetadata mutably.
+    // Opaque iterator state borrowing FileMetadata immutably.
 }
 
 impl FileRowIter<'_> {
@@ -272,7 +280,7 @@ impl FileRowIter<'_> {
 }
 
 pub struct FileRows<'a> {
-    // Opaque standard Iterator state borrowing FileMetadata mutably.
+    // Opaque standard Iterator state borrowing FileMetadata immutably.
 }
 
 impl Iterator for FileRows<'_> {
@@ -375,11 +383,16 @@ impl Iterator for FileRows<'_> {
   not require loading the entire shifted region into memory. Neither
   insertion nor append promises transactional rollback if an I/O error occurs
   after file contents have begun changing.
+- Read operations (`get_raw_metadata`, `read_row`, and `read_rows`) shall
+  borrow `FileMetadata` immutably and use positioned reads that do not alter
+  the file cursor. Unix and Windows implementations shall handle short reads
+  and interruptions until the requested buffer is filled or an I/O error
+  occurs.
 - `iter_rows` shall snapshot the complete row count when called and iterate
   from row zero. `iter_rows_range(start, count)` shall validate the requested
   range against the current row count and iterate that range only. Both
-  methods shall return an iterator that holds an exclusive mutable borrow of
-  the `FileMetadata`.
+  methods shall return an iterator that holds a shared immutable borrow of
+  the `FileMetadata`, allowing other readers to operate concurrently.
 - `FileRowIter::next_into` shall fill the caller's exact-`element_size`
   buffer with the next row and return `Ok(true)`. It shall return `Ok(false)`
   when the iterator is exhausted. It shall not allocate a row buffer.
@@ -478,11 +491,9 @@ impl Iterator for FileRows<'_> {
 - The data offset and element size are configuration, not a protection
   boundary. This component does not lock, encrypt, authenticate, or otherwise
   protect file contents.
-- Callers remain responsible for coordinating writes and reads through shared
-  or external file handles.
-- The wrapper does not share state or serialize concurrent file operations.
-  Callers must coordinate any additional file handles they create, especially
-  around metadata moves and row truncation.
+- The wrapper does not provide locking. Immutable positioned reads can run
+  concurrently, but callers must prevent writes and structural mutations from
+  overlapping other accesses, including through additional file handles.
 - The wrapper does not promise atomic rollback if an operating-system error
   occurs partway through resizing metadata or moving rows. Such failures must
   be reported; callers may need to validate or recover the file.
@@ -491,8 +502,8 @@ impl Iterator for FileRows<'_> {
 
 - The wrapper is a new non-generic API; it does not promise source
   compatibility with the generic legacy `FileReference<T>`.
-- Length and count operations shall not alter the file's contents or cursor
-  position.
+- Length/count queries and positioned read operations shall not alter the
+  file's contents or cursor position.
 - File length includes bytes reserved for metadata, while element count
   excludes the configured prefix and any trailing incomplete element.
 - Metadata resizing preserves row bytes but changes their physical offsets;
@@ -569,7 +580,9 @@ impl Iterator for FileRows<'_> {
   buffers, avoiding both output allocations and a wrapper-owned cache.
 - The wrapper takes ownership of one `File`; it does not clone or share the
   file or metadata offset. Callers remain responsible for any additional
-  handles and concurrency coordination.
+  handles and write coordination. Read methods and iterators use immutable
+  borrows and positioned reads, so multiple readers can share the wrapper
+  without racing on a mutable file cursor.
 - Front truncation retains the last `row_count` rows; back truncation retains
   the first `row_count`. Both reject counts larger than the current complete
   row count. Row writes replace existing rows only; `append_row` adds one
@@ -608,11 +621,11 @@ impl Iterator for FileRows<'_> {
 - Row reservation extends file length with `set_len`; this grows its logical
   length but does not guarantee physical disk allocation. Appends and
   insertions within the resulting capacity do not extend the file.
-- Added 29 executable integration tests covering the specified constructors,
-  metadata operations, row operations, iterators, failure handling, and
-  reservation behavior. The metadata-query OS-error case remains not run
-  because there is no deterministic portable way to make `metadata()` fail
-  on an open regular file.
+- Added 31 executable integration tests covering the specified constructors,
+  metadata operations, row operations, iterators, concurrent positioned
+  reads, failure handling, and reservation behavior. The metadata-query
+  OS-error case remains not run because there is no deterministic portable way
+  to make `metadata()` fail on an open regular file.
 - `cargo test --manifest-path rust_serial_file\\Cargo.toml` passed all unit,
   integration, and doc tests; Clippy with warnings denied and `cargo fmt
 --check` passed.
@@ -658,6 +671,7 @@ Use **⏳ Not run** until a test has been executed, then set its status to
 | T-029   | `RSF-FILE-FR-023`                                                                                                                   | Request a row count whose target file size overflows and attempt reservation through a read-only file handle.                                                               | Overflow and file-extension failures are returned; no success-shaped result is reported.                                                                                                                                                                          | `rust_serial_file/tests/file_metadata.rs` | `reports_row_reservation_failures`                   | ✅ Success |
 | T-030   | `RSF-FILE-FR-023`, `RSF-FILE-DS-016`                                                                                                | Reopen a file after reserving capacity without appending all reserved rows.                                                                                                 | The original instance retains its logical count; a newly opened instance interprets complete rows implied by file length as existing rows.                                                                                                                        | `rust_serial_file/tests/file_metadata.rs` | `reopening_treats_reserved_rows_as_existing_rows`    | ✅ Success |
 | T-031   | `RSF-FILE-FR-019`, `RSF-FILE-DS-002`, `RSF-FILE-DS-012`, `RSF-FILE-DS-016`                                                          | Extend logical rows by writing a contiguous block into previously reserved capacity.                                                                                      | The block is written without changing reserved physical length, and the current instance's logical row count increases to include the new rows.                                                                                                                | `rust_serial_file/tests/file_metadata.rs` | `writes_rows_into_reserved_capacity_and_updates_logical_count` | ✅ Success |
+| T-032   | `RSF-FILE-RS-018`                                                                                                                   | Run concurrent reads of metadata and indexed/block rows through shared references to one `FileMetadata`.                                                                    | Every reader receives the requested bytes without interference from another reader's file position or buffer.                                                                                                                                               | `rust_serial_file/tests/file_metadata.rs` | `supports_concurrent_positioned_reads`                 | ✅ Success |
 
 ### Acceptance criteria
 
@@ -683,7 +697,8 @@ Use **⏳ Not run** until a test has been executed, then set its status to
    promise physical disk-block allocation.
 8. Zero element size, offset boundaries, trailing partial elements, and
    filesystem errors have explicit tested behavior.
-9. Length/count queries do not change file contents or cursor position.
+9. Length/count queries and positioned reads do not change file contents or
+   cursor position.
 10. Applicable formatting, lint, build, and test checks pass.
 
 ## Code coverage
@@ -696,14 +711,14 @@ reported percentage.
 - **Coverage tool:** `cargo-llvm-cov` 0.9.1, via
   `cargo llvm-cov --manifest-path rust_serial_file\\Cargo.toml --summary-only`.
 - **Measured scope:** The complete `src/file/file_metadata.rs` production
-  module, exercised by the full crate test suite (71 tests passed).
-- **Coverage summary:** 98.29% lines (350/356), 86.23% regions (595/690),
-  and 97.22% functions (35/36).
-- **Uncovered behavior:** Six source lines and one function remain
+  module, exercised by the full crate test suite (139 tests passed).
+- **Coverage summary:** 94.76% lines (362/382), 84.89% regions (629/741),
+  and 92.50% functions (37/40).
+- **Uncovered behavior:** Twenty source lines and three functions remain
   uncovered, primarily defensive error-handling paths such as allocation and
   file-operation failures. T-008 remains **⏳ Not run** because this platform
   has no deterministic portable way to make `File::metadata()` fail for a
-  valid open file handle; the implementation propagates its error directly.
+  valid open regular file; the implementation propagates its error directly.
 
 ## Out of scope
 

@@ -128,13 +128,13 @@ fn opens_existing_file_without_truncating() {
 
 #[test]
 fn loads_exact_raw_metadata() {
-    let (_directory, mut metadata) = open_metadata(b"metaabcd", 2, 4);
+    let (_directory, metadata) = open_metadata(b"metaabcd", 2, 4);
     let mut prefix = [0; 4];
     metadata.get_raw_metadata(&mut prefix).unwrap();
     assert_eq!(&prefix, b"meta");
     assert!(metadata.get_raw_metadata(&mut [0; 3]).is_err());
 
-    let (_directory, mut short) = open_metadata(b"abc", 2, 4);
+    let (_directory, short) = open_metadata(b"abc", 2, 4);
     assert!(short.get_raw_metadata(&mut [0; 4]).is_err());
 }
 
@@ -211,6 +211,33 @@ fn reads_and_writes_rows_without_buffering() {
 }
 
 #[test]
+fn supports_concurrent_positioned_reads() {
+    let (_directory, metadata) = open_metadata(b"metadataabcdefgh", 2, 8);
+    let metadata = &metadata;
+
+    std::thread::scope(|scope| {
+        for worker in 0..8 {
+            scope.spawn(move || {
+                for iteration in 0..100 {
+                    let mut raw_metadata = [0; 8];
+                    metadata.get_raw_metadata(&mut raw_metadata).unwrap();
+                    assert_eq!(&raw_metadata, b"metadata");
+
+                    let index = (worker + iteration) % 4;
+                    let mut row = [0; 2];
+                    metadata.read_row(index as u64, &mut row).unwrap();
+                    assert_eq!(&row, &b"abcdefgh"[index * 2..index * 2 + 2]);
+
+                    let mut rows = [0; 8];
+                    metadata.read_rows(0, &mut rows).unwrap();
+                    assert_eq!(&rows, b"abcdefgh");
+                }
+            });
+        }
+    });
+}
+
+#[test]
 fn exposes_read_only_layout_metadata() {
     let (_directory, mut metadata) = open_metadata(b"metaabcd", 2, 4);
     assert_eq!(metadata.data_offset(), 4);
@@ -224,7 +251,7 @@ fn exposes_read_only_layout_metadata() {
 
 #[test]
 fn iterates_all_rows_into_reusable_buffer() {
-    let (_directory, mut metadata) = open_metadata(b"abcdef", 2, 0);
+    let (_directory, metadata) = open_metadata(b"abcdef", 2, 0);
     let mut iter = metadata.iter_rows().unwrap();
     let mut row = [0; 2];
     assert!(iter.next_into(&mut row).unwrap());
@@ -238,7 +265,7 @@ fn iterates_all_rows_into_reusable_buffer() {
 
 #[test]
 fn iterates_selected_row_range() {
-    let (_directory, mut metadata) = open_metadata(b"abcdef", 2, 0);
+    let (_directory, metadata) = open_metadata(b"abcdef", 2, 0);
     let mut iter = metadata.iter_rows_range(1, 1).unwrap();
     let mut row = [0; 2];
     assert!(iter.next_into(&mut row).unwrap());
@@ -253,12 +280,12 @@ fn iterates_selected_row_range() {
 #[test]
 fn validates_row_iterator_buffer_size() {
     {
-        let (_directory, mut metadata) = open_metadata(b"abcd", 2, 0);
+        let (_directory, metadata) = open_metadata(b"abcd", 2, 0);
         let mut iter = metadata.iter_rows().unwrap();
         assert!(iter.next_into(&mut [0; 1]).is_err());
     }
     {
-        let (_directory, mut metadata) = open_metadata(b"abcd", 2, 0);
+        let (_directory, metadata) = open_metadata(b"abcd", 2, 0);
         let mut iter = metadata.iter_rows().unwrap();
         let mut row = [0; 2];
         assert!(iter.next_into(&mut row).unwrap());
@@ -269,7 +296,7 @@ fn validates_row_iterator_buffer_size() {
 
 #[test]
 fn standard_iterator_yields_all_rows() {
-    let (_directory, mut metadata) = open_metadata(b"abcdef", 2, 0);
+    let (_directory, metadata) = open_metadata(b"abcdef", 2, 0);
     let rows = metadata
         .rows()
         .unwrap()
@@ -280,7 +307,7 @@ fn standard_iterator_yields_all_rows() {
 
 #[test]
 fn standard_iterator_yields_selected_range() {
-    let (_directory, mut metadata) = open_metadata(b"abcdef", 2, 0);
+    let (_directory, metadata) = open_metadata(b"abcdef", 2, 0);
     let rows = metadata
         .rows_range(1, 1)
         .unwrap()
@@ -301,7 +328,7 @@ fn standard_iterator_stops_after_read_error() {
         .write(true)
         .open(&path)
         .unwrap();
-    let mut metadata = FileMetadata::new(file, 2, 0).unwrap();
+    let metadata = FileMetadata::new(file, 2, 0).unwrap();
     let mut rows = metadata.rows().unwrap();
     OpenOptions::new()
         .write(true)
@@ -316,7 +343,7 @@ fn standard_iterator_stops_after_read_error() {
 
 #[test]
 fn reads_contiguous_row_blocks() {
-    let (_directory, mut metadata) = open_metadata(b"abcdef", 2, 0);
+    let (_directory, metadata) = open_metadata(b"abcdef", 2, 0);
     let mut rows = [0; 4];
     metadata.read_rows(1, &mut rows).unwrap();
     assert_eq!(&rows, b"cdef");
@@ -484,7 +511,7 @@ fn reopening_treats_reserved_rows_as_existing_rows() {
     metadata.reserve_rows(4).unwrap();
     assert_eq!(metadata.element_count().unwrap(), 1);
 
-    let mut reopened = FileMetadata::open_or_create(&path, 2, 0).unwrap();
+    let reopened = FileMetadata::open_or_create(&path, 2, 0).unwrap();
     assert_eq!(reopened.element_count().unwrap(), 4);
     let mut reserved_row = [1; 2];
     reopened.read_row(1, &mut reserved_row).unwrap();

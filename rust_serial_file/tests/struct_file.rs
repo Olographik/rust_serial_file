@@ -508,7 +508,7 @@ fn read_file_from_metadata(metadata: FileMetadata) -> Vec<u8> {
     let directory = tempdir().unwrap();
     let path = directory.path().join("copy.bin");
     let mut output = File::create(&path).unwrap();
-    let mut metadata = metadata;
+    let metadata = metadata;
     let mut prefix = vec![0; metadata.data_offset() as usize];
     metadata.get_raw_metadata(&mut prefix).unwrap();
     output.write_all(&prefix).unwrap();

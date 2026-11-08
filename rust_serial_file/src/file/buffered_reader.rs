@@ -6,7 +6,7 @@ const DEFAULT_CACHE_BYTES: usize = 64 * 1024;
 
 /// A read-only, cached row reader over caller-owned file metadata.
 pub struct BufferedReader<'metadata> {
-    metadata: &'metadata mut FileMetadata,
+    metadata: &'metadata FileMetadata,
     element_size: usize,
     row_count: u64,
     row_capacity: usize,
@@ -18,7 +18,7 @@ pub struct BufferedReader<'metadata> {
 
 impl<'metadata> BufferedReader<'metadata> {
     /// Creates a reader with a cache targeting 64 KiB of row data.
-    pub fn new(metadata: &'metadata mut FileMetadata) -> Result<Self> {
+    pub fn new(metadata: &'metadata FileMetadata) -> Result<Self> {
         let element_size =
             usize::try_from(metadata.element_size()).context("row width does not fit in memory")?;
 
@@ -27,17 +27,14 @@ impl<'metadata> BufferedReader<'metadata> {
     }
 
     /// Creates a reader with an explicit positive row capacity.
-    pub fn with_capacity(
-        metadata: &'metadata mut FileMetadata,
-        row_capacity: usize,
-    ) -> Result<Self> {
+    pub fn with_capacity(metadata: &'metadata FileMetadata, row_capacity: usize) -> Result<Self> {
         let element_size =
             usize::try_from(metadata.element_size()).context("row width does not fit in memory")?;
         Self::with_capacity_and_width(metadata, row_capacity, element_size)
     }
 
     fn with_capacity_and_width(
-        metadata: &'metadata mut FileMetadata,
+        metadata: &'metadata FileMetadata,
         row_capacity: usize,
         element_size: usize,
     ) -> Result<Self> {

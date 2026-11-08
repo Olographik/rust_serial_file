@@ -4,6 +4,11 @@ use std::{
     path::Path,
 };
 
+#[cfg(unix)]
+use std::os::unix::fs::FileExt;
+#[cfg(windows)]
+use std::os::windows::fs::FileExt;
+
 use anyhow::{Context, Result, bail};
 
 const COPY_BUFFER_SIZE: usize = 64 * 1024;
@@ -79,7 +84,7 @@ impl FileMetadata {
         self.element_size
     }
 
-    pub fn get_raw_metadata(&mut self, metadata: &mut [u8]) -> Result<()> {
+    pub fn get_raw_metadata(&self, metadata: &mut [u8]) -> Result<()> {
         if u64::try_from(metadata.len())? != self.data_offset {
             bail!(
                 "metadata buffer length must equal data_offset ({})",
@@ -94,8 +99,7 @@ impl FileMetadata {
             .into());
         }
 
-        self.file.seek(SeekFrom::Start(0))?;
-        self.file.read_exact(metadata)?;
+        read_exact_at(&self.file, metadata, 0)?;
         Ok(())
     }
 
@@ -151,7 +155,7 @@ impl FileMetadata {
         Ok(())
     }
 
-    pub fn read_row(&mut self, index: u64, data: &mut [u8]) -> Result<()> {
+    pub fn read_row(&self, index: u64, data: &mut [u8]) -> Result<()> {
         if u64::try_from(data.len())? != self.element_size {
             bail!(
                 "row buffer length must equal element_size ({})",
@@ -159,8 +163,7 @@ impl FileMetadata {
             );
         }
         self.validate_range(index, 1)?;
-        self.file.seek(SeekFrom::Start(self.row_offset(index)?))?;
-        self.file.read_exact(data)?;
+        read_exact_at(&self.file, data, self.row_offset(index)?)?;
         Ok(())
     }
 
@@ -178,15 +181,14 @@ impl FileMetadata {
         Ok(())
     }
 
-    pub fn read_rows(&mut self, start: u64, data: &mut [u8]) -> Result<()> {
+    pub fn read_rows(&self, start: u64, data: &mut [u8]) -> Result<()> {
         let row_count = self.block_row_count(data.len())?;
         self.validate_range(start, row_count)?;
         if row_count == 0 {
             return Ok(());
         }
 
-        self.file.seek(SeekFrom::Start(self.row_offset(start)?))?;
-        self.file.read_exact(data)?;
+        read_exact_at(&self.file, data, self.row_offset(start)?)?;
         Ok(())
     }
 
@@ -278,7 +280,7 @@ impl FileMetadata {
         Ok(())
     }
 
-    pub fn iter_rows(&mut self) -> Result<FileRowIter<'_>> {
+    pub fn iter_rows(&self) -> Result<FileRowIter<'_>> {
         let row_count = self.element_count()?;
         Ok(FileRowIter {
             metadata: self,
@@ -288,7 +290,7 @@ impl FileMetadata {
         })
     }
 
-    pub fn iter_rows_range(&mut self, start: u64, count: u64) -> Result<FileRowIter<'_>> {
+    pub fn iter_rows_range(&self, start: u64, count: u64) -> Result<FileRowIter<'_>> {
         self.validate_range(start, count)?;
         let end_index = start.checked_add(count).context("row range overflow")?;
         Ok(FileRowIter {
@@ -299,7 +301,7 @@ impl FileMetadata {
         })
     }
 
-    pub fn rows(&mut self) -> Result<FileRows<'_>> {
+    pub fn rows(&self) -> Result<FileRows<'_>> {
         let element_size = usize::try_from(self.element_size)?;
         Ok(FileRows {
             inner: self.iter_rows()?,
@@ -308,7 +310,7 @@ impl FileMetadata {
         })
     }
 
-    pub fn rows_range(&mut self, start: u64, count: u64) -> Result<FileRows<'_>> {
+    pub fn rows_range(&self, start: u64, count: u64) -> Result<FileRows<'_>> {
         let element_size = usize::try_from(self.element_size)?;
         Ok(FileRows {
             inner: self.iter_rows_range(start, count)?,
@@ -383,7 +385,7 @@ impl FileMetadata {
 }
 
 pub struct FileRowIter<'a> {
-    metadata: &'a mut FileMetadata,
+    metadata: &'a FileMetadata,
     next_index: u64,
     end_index: u64,
     exhausted: bool,
@@ -450,6 +452,50 @@ impl Iterator for FileRows<'_> {
 }
 
 impl std::iter::FusedIterator for FileRows<'_> {}
+
+#[cfg(windows)]
+fn read_at(file: &File, buffer: &mut [u8], offset: u64) -> io::Result<usize> {
+    file.seek_read(buffer, offset)
+}
+
+#[cfg(unix)]
+fn read_at(file: &File, buffer: &mut [u8], offset: u64) -> io::Result<usize> {
+    file.read_at(buffer, offset)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn read_at(_file: &File, _buffer: &mut [u8], _offset: u64) -> io::Result<usize> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "positioned file reads are not supported on this platform",
+    ))
+}
+
+fn read_exact_at(file: &File, mut buffer: &mut [u8], offset: u64) -> io::Result<()> {
+    let mut position = offset;
+    while !buffer.is_empty() {
+        match read_at(file, buffer, position) {
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "failed to fill the entire buffer",
+                ));
+            }
+            Ok(read) => {
+                let read_u64 = u64::try_from(read).map_err(|_| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "read size overflow")
+                })?;
+                position = position.checked_add(read_u64).ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "file offset overflow")
+                })?;
+                buffer = &mut buffer[read..];
+            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
 
 fn move_range(file: &mut File, source: u64, destination: u64, length: u64) -> Result<()> {
     if length == 0 || source == destination {

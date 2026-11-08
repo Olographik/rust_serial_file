@@ -184,7 +184,7 @@ impl<T: SerializedStruct> SerialDataReader<T> for StructFile<T> {
 
     fn serial_iter(&mut self) -> Result<Self::Iter<'_>> {
         Ok(StructFileIter {
-            reader: BufferedReader::new(&mut self.metadata)?,
+            reader: BufferedReader::new(&self.metadata)?,
             next_index: 0,
             end_index: self.len,
             _record: PhantomData,

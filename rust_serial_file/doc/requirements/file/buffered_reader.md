@@ -2,7 +2,7 @@
 
 - **Date:** 2026-11-08
 - **Author:** `Olographik`
-- **Revision:** 0.1
+- **Revision:** 0.2
 - **Short description:** Define a buffered, read-only row reader that wraps `FileMetadata` and provides indexed and iterator access to raw byte rows.
 
 ## Table of contents
@@ -37,10 +37,10 @@ provides a standard iterator yielding owned `Vec<u8>` rows, a custom iterator
 that fills a caller-provided row buffer, and a lending iterator that returns
 slices into the cache.
 
-The reader snapshots the logical row count at construction. The caller
-retains ownership of `FileMetadata` and is responsible for coordinating any
-other access to the underlying file, including access through other handles
-or processes.
+The reader snapshots the logical row count at construction. It only needs an
+immutable borrow of `FileMetadata`, so multiple independent readers can use
+the same metadata concurrently. The caller retains ownership and must
+coordinate writes or structural changes through other handles or processes.
 
 ## Goals and scope
 
@@ -56,6 +56,7 @@ or processes.
 - Provide indexed reads and three iterator styles with explicit bounds and
   observable storage errors.
 - Provide a caller-buffer row read path to avoid allocating a row `Vec`.
+- Allow independent readers to share an immutable `FileMetadata` borrow.
 
 ### Scope
 
@@ -66,6 +67,8 @@ or processes.
 - Specify direct row access, full/ranged owned-row iteration, and
   full/ranged caller-buffer iteration.
 - Reuse `FileMetadata` for row layout, row count, and contiguous file reads.
+- Borrow `FileMetadata` immutably so separate readers can perform concurrent
+  read-only operations without contention on the file cursor.
 - Leave file creation, metadata interpretation, and row mutation to
   `FileMetadata` or other components.
 
@@ -83,6 +86,10 @@ or processes.
   Changes made through another file handle or process while the reader is
   alive are unsupported; the caller is responsible for coordinating them.
   Cached data and snapshot length are not refreshed.
+- `FileMetadata` row reads use positioned I/O and shared borrows. Each
+  `BufferedReader` still has its own mutable cache and is not shared
+  concurrently; separate readers can be used concurrently while writes and
+  structural mutations are externally excluded.
 - Existing project Rust edition, MSRV, dependencies, and lint policies apply.
 
 ## Requirements
@@ -122,7 +129,7 @@ or processes.
 | ID | Requirement |
 |---|---|
 | `RSF-BR-RS-001` | `BufferedReader` shall be a concrete, non-generic type. |
-| `RSF-BR-RS-002` | The reader shall borrow `FileMetadata` mutably for its lifetime, shall not own or implement `Clone` for it, and shall not internally synchronize access. |
+| `RSF-BR-RS-002` | The reader shall borrow `FileMetadata` immutably for its lifetime, shall not own or implement `Clone` for it, and shall not internally synchronize access. |
 | `RSF-BR-RS-003` | Construction and cache allocation shall be fallible and report errors through `anyhow::Result`; allocation failure shall not panic or be converted to success. |
 | `RSF-BR-RS-004` | The reader shall expose its captured row count as `u64` without performing fallible file I/O. |
 | `RSF-BR-RS-005` | Iterator items shall be `anyhow::Result<Vec<u8>>`; the iterator shall visit its captured range in ascending order and report per-row read errors as `Err` items. |
@@ -131,6 +138,7 @@ or processes.
 | `RSF-BR-RS-008` | The custom iterator's `next_into` method shall fill an exact-width caller buffer and return `anyhow::Result<bool>`, where `false` indicates exhaustion. |
 | `RSF-BR-RS-009` | The lending iterator shall expose `next(&mut self) -> Option<anyhow::Result<&[u8]>>`; a successful row slice borrows the reader's cache and remains valid only until the iterator is mutably accessed again. |
 | `RSF-BR-RS-010` | `reset_capacity` shall reject zero capacity and return an error if resizing cache storage fails; on failure, the prior capacity and cache shall remain unchanged. |
+| `RSF-BR-RS-011` | `BufferedReader` shall borrow `FileMetadata` immutably, allowing multiple independent buffered readers to coexist and perform reads concurrently; it shall not add synchronization for writes or mutations. |
 
 ## Public API
 
@@ -147,10 +155,10 @@ pub struct BufferedRowIter<'a> { /* private fields */ }
 pub struct BufferedRowSliceIter<'iter, 'metadata> { /* private fields */ }
 
 impl<'a> BufferedReader<'a> {
-    pub fn new(metadata: &'a mut FileMetadata) -> anyhow::Result<Self>;
+    pub fn new(metadata: &'a FileMetadata) -> anyhow::Result<Self>;
 
     pub fn with_capacity(
-        metadata: &'a mut FileMetadata,
+        metadata: &'a FileMetadata,
         row_capacity: usize,
     ) -> anyhow::Result<Self>;
 
@@ -286,8 +294,10 @@ impl Iterator for BufferedRows<'_> {
 - Cached bytes remain in memory until replaced or the reader is dropped.
   Secure zeroization is not required by this component.
 - The reader does not synchronize access to the borrowed `FileMetadata` or
-  underlying file. The caller is responsible for coordinating other handles
-  and processes and preventing conflicting access while the reader is in use.
+  underlying file. Separate readers can safely perform read-only access
+  concurrently through the cursor-independent `FileMetadata` read API. The
+  caller must exclude writes and structural mutations, including through
+  other handles and processes.
 
 ## Compatibility
 
@@ -323,8 +333,9 @@ impl Iterator for BufferedRows<'_> {
 - All iterator styles shall reuse the cache across adjacent rows and shall
   not cause a separate file read for every row when multiple rows fit in a
   refill.
-- The reader provides no synchronization against other file handles or
-  processes. The caller is responsible for coordinating concurrent access.
+- The reader provides no synchronization against writes through other file
+  handles or processes. The caller must prevent those writes and structural
+  mutations from overlapping reader access.
 
 ## Phases
 
@@ -358,8 +369,9 @@ impl Iterator for BufferedRows<'_> {
 
 - The lending iterator borrows the reader cache for each returned row, so it
   cannot implement the standard `Iterator` trait; its required `next` method
-  is provided directly. The existing `FileMetadata` block-read API supports
-  the specified borrowing and error behavior without changes.
+  is provided directly. `BufferedReader` now uses a shared `FileMetadata`
+  borrow, so independent readers can safely use the positioned block-read API
+  concurrently while retaining separate mutable caches.
 
 ## Testing and acceptance criteria
 
@@ -370,7 +382,7 @@ Use **⏳ Not run** until a test has been executed, then set its status to
 
 | Test ID | Requirement IDs | Description of the test | Success requirements | Test file | Test name | Status |
 |---|---|---|---|---|---|---|
-| T-001 | `RSF-BR-FR-001`, `RSF-BR-RS-001`, `RSF-BR-RS-002` | Construct a reader from a mutable borrow of `FileMetadata`. | The caller retains the metadata owner, and the reader can use it for the duration of its borrow. | `rust_serial_file/tests/buffered_reader.rs` | `constructs_from_borrowed_file_metadata` | ✅ Success |
+| T-001 | `RSF-BR-FR-001`, `RSF-BR-RS-001`, `RSF-BR-RS-002` | Construct a reader from an immutable borrow of `FileMetadata`. | The caller retains the metadata owner, and the reader can use it for the duration of its borrow. | `rust_serial_file/tests/buffered_reader.rs` | `constructs_from_borrowed_file_metadata` | ✅ Success |
 | T-002 | `RSF-BR-FR-005`, `RSF-BR-RS-007` | Construct with zero explicit row capacity. | Construction returns an error without allocating or panicking. | `rust_serial_file/tests/buffered_reader.rs` | `rejects_zero_cache_capacity` | ✅ Success |
 | T-003 | `RSF-BR-FR-002`, `RSF-BR-DS-001`, `RSF-BR-RS-004` | Query the reader length and read a raw byte row by index. | The length is the captured complete-row count and the returned borrowed slice exactly matches the selected row without an output allocation. | `rust_serial_file/tests/buffered_reader.rs` | `reads_raw_rows_and_reports_length` | ✅ Success |
 | T-004 | `RSF-BR-FR-003`, `RSF-BR-RS-006` | Read a row into a caller-provided exact-width buffer and try incorrect widths. | An exact-width buffer receives the row without an output allocation; incorrect widths return errors. | `rust_serial_file/tests/buffered_reader.rs` | `reads_into_caller_buffer` | ✅ Success |
@@ -388,6 +400,7 @@ Use **⏳ Not run** until a test has been executed, then set its status to
 | T-016 | `RSF-BR-FR-006` | Iterate a selected row range with the owned-row iterator. | `rows_range` yields exactly the requested rows in order and rejects invalid or overflowing ranges. | `rust_serial_file/tests/buffered_reader.rs` | `iterates_selected_owned_row_range` | ✅ Success |
 | T-017 | `RSF-BR-FR-012`, `RSF-BR-RS-009` | Iterate full and ranged rows through the lending iterator while reading each returned slice before advancing. | Each slice points to exactly one correct cached row, can be used without an owned row allocation, and is no longer used before the next mutable iterator call. | `rust_serial_file/tests/buffered_reader.rs` | `iterates_rows_as_cache_slices` | ✅ Success |
 | T-018 | `RSF-BR-FR-013`, `RSF-BR-DS-007`, `RSF-BR-RS-010` | Increase and decrease cache capacity after loading rows, reset to the current capacity, then attempt invalid and unallocatable resets. | Changed capacities invalidate the cache and subsequent reads refill correctly; resetting to the current capacity is a no-op. Row count and file bytes remain unchanged. Invalid or unallocatable resets return errors and preserve the existing capacity/cache. | `rust_serial_file/tests/buffered_reader.rs` | `resets_capacity_and_invalidates_cache` | ✅ Success |
+| T-019 | `RSF-BR-RS-011` | Construct independent buffered readers over one shared immutable `FileMetadata` reference and read distinct rows concurrently. | Each reader returns its expected row from its independent cache without requiring a mutable borrow of `FileMetadata`. | `rust_serial_file/tests/buffered_reader.rs` | `supports_multiple_readers_from_shared_metadata` | ✅ Success |
 
 ### Acceptance criteria
 
@@ -415,13 +428,13 @@ Use **⏳ Not run** until a test has been executed, then set its status to
 ## Code coverage
 
 Coverage was measured with `cargo-llvm-cov 0.9.1` using
-`cargo llvm-cov --lib --test buffered_reader --summary-only`. The run executed
-36 library unit tests and 18 buffered-reader integration tests; no production
-files were excluded.
+`cargo llvm-cov --manifest-path rust_serial_file\\Cargo.toml --summary-only`.
+The full crate test suite ran 139 tests, including 19 buffered-reader
+integration tests; no production files were excluded.
 
 | Scope | Lines | Functions | Regions | Branches |
 |---|---:|---:|---:|---:|
-| `src/file/buffered_reader.rs` | 100% (236/236) | 100% (27/27) | 96.36% (318/330) | Not instrumented (0 reported) |
+| `src/file/buffered_reader.rs` | 100% (233/233) | 100% (27/27) | 96.36% (318/330) | Not instrumented (0 reported) |
 
 No executable source lines or functions remain uncovered. The 12 missed
 regions are error-context and checked-conversion/arithmetic expression paths;
@@ -436,6 +449,7 @@ zero-width rows and stores the width as `u64`.
 - Changing `FileMetadata` behavior or defining another on-disk format.
 - Persisting cache state or reserved capacity across reopen.
 - Providing a coherent snapshot in the presence of external file mutation.
-- Thread-safe shared access, synchronization, or locking.
+- Synchronization or locking for writes and structural mutations. Independent
+  read-only `BufferedReader` instances may share `FileMetadata`.
 - Multi-window caching, prefetch threads, asynchronous I/O, and configurable
   eviction policies.
