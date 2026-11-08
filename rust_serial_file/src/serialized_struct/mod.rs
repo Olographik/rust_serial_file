@@ -41,6 +41,36 @@ macro_rules! impl_decode_raw {
 
 pub trait SerializedStruct: DecodeRaw + EncodeRaw {
     const SIZE: usize;
+
+    fn try_encode(&self, data: &mut [u8]) -> anyhow::Result<usize>
+    where
+        Self: Sized,
+    {
+        if data.len() < Self::SIZE {
+            anyhow::bail!(
+                "cannot encode {} bytes into a {}-byte buffer",
+                Self::SIZE,
+                data.len()
+            );
+        }
+
+        Ok(self.encode(data))
+    }
+
+    fn try_decode(data: &[u8]) -> anyhow::Result<Self>
+    where
+        Self: Sized,
+    {
+        if data.len() < Self::SIZE {
+            anyhow::bail!(
+                "cannot decode {} bytes from a {}-byte buffer",
+                Self::SIZE,
+                data.len()
+            );
+        }
+
+        Ok(Self::from_le_bytes_only(data))
+    }
 }
 
 macro_rules! impl_raw_serialized_struct {
