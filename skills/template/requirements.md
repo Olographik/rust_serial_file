@@ -169,6 +169,10 @@ Record the coverage results in this section or provide a path to a checked-in
 coverage summary file. Include the coverage tool, the measured scope, the
 coverage percentage, and any relevant threshold or uncovered areas.
 
+- Maximize test coverage of the component's production code. Add tests for all
+  reachable behavior and branches where practical; document and justify any
+  remaining uncovered code. Do not reduce coverage by excluding relevant code
+  from the measured scope.
 - **Coverage summary:** Add results here, or link a summary file such as
   `path/to/coverage-summary.md`.
 
