@@ -83,6 +83,10 @@ fn rejects_zero_element_size() {
     let path = directory.path().join("records.bin");
     let file = File::create(path).unwrap();
     assert!(FileMetadata::new(file, 0, 0).is_err());
+
+    let path = directory.path().join("must-not-be-created.bin");
+    assert!(FileMetadata::open_or_create(&path, 0, 0).is_err());
+    assert!(!path.exists());
 }
 
 #[test]
