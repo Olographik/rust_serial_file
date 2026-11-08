@@ -94,16 +94,18 @@ call `flush` before dropping the writer.
 - Cache capacity is expressed as a positive row count. The default cache
   targets 64 KiB of row data, rounds down to a whole-row count, and holds at
   least one row.
-- A write window begins at the index of the first write staged in that
-  window and spans up to the configured capacity. It may include slots at
-  the current logical end for contiguous pending appends. Writes whose start
-  or complete range does not fit the active window cause pending dirty rows
-  to flush before the new window is used.
-- Within an active window, arbitrary rows may be staged or overwritten. The
-  writer tracks modified rows so flushing never writes over rows that were
-  not explicitly staged.
-- The active window is considered full when every row in that window has a
-  pending write; it is flushed immediately.
+- A write window begins at the index of the first row staged in that window.
+  The cache represents one contiguous row range from that index through its
+  end pointer. Rewrites may replace rows within that range; a write starting
+  after its end would create a gap, so pending data is flushed and a new
+  window starts at the new write's index.
+- A write whose complete range does not fit the active capacity also flushes
+  pending data before starting a new window at the write's index.
+- The end pointer is the number of contiguous rows staged in the cache. All
+  bytes before it are pending writes and are flushed together; no per-row
+  dirty-state array is maintained.
+- The cache is considered full when the end pointer reaches its capacity; it
+  is flushed immediately.
 - Existing project Rust edition, MSRV, dependencies, and lint policies apply.
 
 ## Requirements
@@ -119,7 +121,7 @@ call `flush` before dropping the writer.
 | `RSF-BW-FR-005` | The writer shall flush pending rows when the active window becomes full, when the caller explicitly invokes `flush`, and when the writer is dropped. |
 | `RSF-BW-FR-006` | A block containing more rows than the cache capacity shall first flush pending cached rows, then bypass the cache and pass the entire contiguous block to `FileMetadata::write_rows` without cache-sized chunking; `write_rows` shall support contiguous extension beyond the logical end. |
 | `RSF-BW-FR-007` | A block that fits the cache capacity shall be staged in the active window when it fits; otherwise pending writes shall be flushed before staging the block in a new window. |
-| `RSF-BW-FR-008` | A successful explicit `flush` shall write all pending dirty rows and leave the cache empty of pending modifications. |
+| `RSF-BW-FR-008` | A successful explicit `flush` shall write the contiguous cached range before its end pointer and reset the cache range to empty. |
 | `RSF-BW-FR-009` | The writer shall use `FileMetadata::write_row` or `write_rows` for all file writes and shall not clone or otherwise access the underlying file handle. |
 | `RSF-BW-FR-010` | The writer shall append rows contiguously at the logical end and update its logical row count; it shall not insert rows or implement the `SerialDataWriter` trait. |
 | `RSF-BW-FR-011` | The file module shall expose `BufferedWriter` and its public constructors and methods. |
@@ -131,7 +133,7 @@ call `flush` before dropping the writer.
 | `RSF-BW-DS-001` | Rows are exactly `FileMetadata::element_size()` opaque bytes; row indices begin at zero and preserve the existing file order. |
 | `RSF-BW-DS-002` | The writer shall capture the row width and initial logical row count at construction. Its logical row count shall grow as appends are accepted, including pending appends, and all subsequent write bounds shall use the updated count. |
 | `RSF-BW-DS-003` | A block buffer shall contain a whole number of rows. Its row count shall be derived from its byte length and the captured row width using checked conversions. |
-| `RSF-BW-DS-004` | The cache shall hold no more than its configured capacity of rows and shall track which rows contain pending writes. Flushing shall write only pending rows, not untouched rows within the active window. |
+| `RSF-BW-DS-004` | The cache shall hold no more than its configured capacity of contiguous rows beginning at the active window start. The end pointer shall delimit all staged rows to flush; a write that would leave a gap shall flush the current range and start a new window rather than write untouched rows. |
 | `RSF-BW-DS-005` | A block larger than the configured capacity shall not be copied into the cache; after pending writes flush successfully, the entire block shall be passed directly to `FileMetadata::write_rows`, which shall overwrite its existing-row prefix and append any contiguous suffix. |
 | `RSF-BW-DS-006` | The writer shall not promise a transactional block write. If a file write fails after partially modifying the file, the error shall be reported and rollback is not required. |
 | `RSF-BW-DS-007` | The writer shall not detect or reconcile external changes to the file while alive. The caller is responsible for coordinating access through other handles or processes. |
@@ -200,13 +202,13 @@ impl<'a> BufferedWriter<'a> {
 - A buffered block that overwrites existing rows and appends a suffix shall
   validate the complete request before modifying pending data; an invalid
   range or gap shall reject the whole request.
-- For writes within cache capacity, a starting index outside the active
-  window shall flush the pending dirty rows before establishing a new window.
-  A write entirely contained in the active window may stage or replace rows
-  there. A block that does not fit the active window shall flush pending rows
-  and start a new window at its requested start index.
-- Filling all rows of the active window with pending writes shall flush it
-  immediately and clear its pending state.
+- For writes within cache capacity, a write that starts before the active
+  window, beyond its end pointer, or whose complete range exceeds the active
+  capacity shall flush the pending range before establishing a new window at
+  the requested start. A write that overlaps or extends the contiguous
+  cached range may replace or append rows there.
+- When the end pointer reaches the cache capacity, the contiguous cached
+  range shall flush immediately and the cache range shall reset.
 - For cached append rows, a successful flush shall append each pending row
   exactly once and keep the writer's logical count consistent with accepted
   pending appends. If a flush partially appends then fails, retry behavior
@@ -219,8 +221,7 @@ impl<'a> BufferedWriter<'a> {
 ## Errors and failure behavior
 
 - Construction shall return an error if querying the row count fails, if row
-  width conversion or cache sizing overflows, or if cache or dirty-state
-  allocation fails.
+  width conversion or cache sizing overflows, or if cache allocation fails.
 - Construction with zero explicit row capacity shall return an error.
 - Row writes shall return errors for an index greater than the current logical
   row count or for a row slice with an incorrect width.
@@ -278,13 +279,12 @@ impl<'a> BufferedWriter<'a> {
 ## Performance and resource use
 
 - The writer shall keep one cache window of at most the configured row
-  capacity and track pending rows with bounded metadata.
+  capacity and track its contiguous pending range with an end pointer.
 - A single-row write shall not require a separate file write until a flush
   condition occurs.
-- Contiguous pending overwrites shall be flushed using as few `write_rows`
-  operations as practical; untouched rows shall not be written merely because
-  they fall inside the active window. Contiguous pending appends shall be
-  combined into `write_rows` calls beginning at the current logical end.
+- The contiguous cached range shall be flushed in one `write_rows`
+  operation. To avoid writing untouched rows, a write that would leave a gap
+  flushes the current range before a new range starts at that write's index.
 - A cache-full event, explicit flush, window transition, and drop each flush
   pending data before the relevant operation completes.
 - A block larger than the cache capacity shall bypass cache copying. After
@@ -305,21 +305,21 @@ impl<'a> BufferedWriter<'a> {
 | Phase ID | Phase and implementation steps | Dependencies | Completion criteria |
 |---|---|---|---|
 | P-001 | Confirm ownership, row/block semantics, append behavior, cache-window behavior, flush triggers, oversized-block handling, and error behavior. | None. | This requirement defines all public behavior, boundaries, dependencies, and observable failures needed for implementation. |
-| P-002 | Implement `BufferedWriter`, bounded dirty-row cache, row overwrites and appends, block writes, flush transitions, and best-effort drop flushing. | P-001. | The writer borrows `FileMetadata`, preserves untouched rows, appends only at the contiguous logical end, uses direct writes for oversized blocks, and propagates explicit-operation errors. |
+| P-002 | Implement `BufferedWriter`, bounded contiguous cache with an end pointer, row overwrites and appends, block writes, flush transitions, and best-effort drop flushing. | P-001. | The writer borrows `FileMetadata`, preserves untouched rows, appends only at the contiguous logical end, uses direct writes for oversized blocks, and propagates explicit-operation errors. |
 | P-003 | Add unit and integration tests for cache transitions, flush behavior, append and block boundaries, errors, and drop behavior; run formatting, lint, build, and test validation. | P-002. | All deterministic requirements have tests and all applicable project checks pass. |
 | P-004 | Run coverage for the complete `BufferedWriter` production module and add tests for uncovered reachable behavior until line coverage reaches 100%. | P-003. | The unfiltered production module reports 100% line coverage. If coverage is below 100%, this phase remains incomplete and the writer is not accepted until additional tests reach the threshold. |
 
 ### Current implementation checklist
 
 - [x] P-001 — `Specify buffered writer contract` — Complete
-- [ ] P-002 — `Implement buffered writer` — Not started
-- [ ] P-003 — `Test and validate buffered writer` — Not started
-- [ ] P-004 — `Measure and complete production coverage` — Not started
+- [x] P-002 — `Implement buffered writer` — Complete
+- [x] P-003 — `Test and validate buffered writer` — Complete
+- [x] P-004 — `Measure and complete production coverage` — Complete
 
 **Planning reflection (complete before implementation):**
 
 - Separating contract definition from cache implementation and validation
-  establishes the write/flush semantics before handling dirty rows.
+  establishes the write/flush semantics before managing the cached range.
 - P-002 depends on P-001; P-003 depends on the implementation existing; P-004
   depends on the production module and its behavioral tests being complete.
 - Key risks are not overwriting untouched rows, preserving pending writes
@@ -333,9 +333,18 @@ impl<'a> BufferedWriter<'a> {
 
 **Implementation reflection (update as work progresses):**
 
-- No implementation has started. Revisit the cache-window and dirty-row
-  design if the existing `FileMetadata` API cannot preserve untouched rows
-  while batching buffered writes.
+- The cache stores one bounded contiguous row range. Its end pointer marks
+  the valid pending bytes, and flush writes that entire range in one
+  `write_rows` call. Writes that would create a hole first flush the current
+  range, so untouched rows are never copied into or written from the cache.
+- Blocks larger than the cache flush pending rows first and are then passed
+  through directly. Cached appends update the writer's logical length when
+  staged; direct-block appends update it only after the underlying call
+  succeeds.
+- Integration tests exercise row/block validation, cache transitions,
+  append behavior, direct-write and flush failures, retry, and best-effort
+  drop flushing. `cargo llvm-cov --all-targets --summary-only` measured 100%
+  line coverage for the complete production module.
 
 ## Testing and acceptance criteria
 
@@ -346,22 +355,27 @@ Use **⏳ Not run** until a test has been executed, then set its status to
 
 | Test ID | Requirement IDs | Description of the test | Success requirements | Test file | Test name | Status |
 |---|---|---|---|---|---|---|
-| T-001 | `RSF-BW-FR-001`, `RSF-BW-RS-001` | Construct a writer from a mutable borrow of `FileMetadata`. | The caller retains the metadata owner, and the writer can use it for the duration of its borrow. | `rust_serial_file/tests/buffered_writer.rs` | `constructs_from_borrowed_file_metadata` | ⏳ Not run |
-| T-002 | `RSF-BW-FR-004`, `RSF-BW-RS-003` | Construct with zero capacity and an unrepresentable or unallocatable cache size. | Construction returns an error without panic or file modification. | `rust_serial_file/tests/buffered_writer.rs` | `rejects_invalid_cache_capacity` | ⏳ Not run |
-| T-003 | `RSF-BW-FR-002`, `RSF-BW-DS-001`, `RSF-BW-RS-004`, `RSF-BW-RS-006` | Stage a valid single-row overwrite, append at `len()`, and reject incorrect widths and gaps. | Valid bytes overwrite or append exactly one row; length increases on accepted append; invalid inputs return errors without corrupting pending data. | `rust_serial_file/tests/buffered_writer.rs` | `buffers_single_row_writes_and_appends` | ⏳ Not run |
-| T-004 | `RSF-BW-FR-003`, `RSF-BW-DS-003`, `RSF-BW-RS-005`, `RSF-BW-RS-006` | Stage a block that overwrites existing rows and appends a contiguous suffix; reject misaligned, gapped, or overflowing blocks. | Complete rows are written in order; accepted appended rows increase length immediately; malformed and invalid ranges return errors. | `rust_serial_file/tests/buffered_writer.rs` | `buffers_multiple_rows_and_appends` | ⏳ Not run |
-| T-005 | `RSF-BW-FR-004`, `RSF-BW-DS-004` | Write rows within one active window, including repeated writes to the same row. | Pending values are updated correctly, and rows not written by the caller remain unchanged. | `rust_serial_file/tests/buffered_writer.rs` | `preserves_untouched_rows_in_cache_window` | ⏳ Not run |
-| T-006 | `RSF-BW-FR-004`, `RSF-BW-FR-005` | Write outside the active window after staging rows. | The pending window is flushed before the new window is staged; both sets of rows have the expected values. | `rust_serial_file/tests/buffered_writer.rs` | `flushes_on_cache_window_change` | ⏳ Not run |
-| T-007 | `RSF-BW-FR-005`, `RSF-BW-FR-008` | Fill the active cache window with pending row writes. | The full window is flushed automatically and no dirty data remains pending. | `rust_serial_file/tests/buffered_writer.rs` | `flushes_when_cache_is_full` | ⏳ Not run |
-| T-008 | `RSF-BW-FR-005`, `RSF-BW-FR-008` | Explicitly flush pending writes, flush again, and verify file contents. | The first flush writes all pending rows, the second is a no-op, and explicit flush errors are returned. | `rust_serial_file/tests/buffered_writer.rs` | `flushes_explicitly_and_is_idempotent` | ⏳ Not run |
-| T-009 | `RSF-BW-FR-005`, `RSF-BW-RS-007` | Drop a writer with pending data. | Drop attempts to flush pending data and does not panic. | `rust_serial_file/tests/buffered_writer.rs` | `flushes_pending_rows_on_drop` | ⏳ Not run |
-| T-010 | `RSF-BW-FR-006`, `RSF-BW-DS-005` | Write an oversized block that overwrites existing rows and appends a suffix while other rows are pending. | Pending cache data is flushed first; the full block is sent to one `FileMetadata::write_rows` call and written in order without cache-sized chunking. | `rust_serial_file/tests/buffered_writer.rs` | `writes_oversized_block_directly_after_flush` | ⏳ Not run |
-| T-011 | `RSF-BW-FR-007` | Write a block within capacity that does not fit the remaining active window. | Pending rows flush first, then the block is staged in a new window without splitting. | `rust_serial_file/tests/buffered_writer.rs` | `moves_fitting_block_to_new_window` | ⏳ Not run |
-| T-012 | `RSF-BW-RS-006` | Write an empty block at a valid index, at the one-past-end index, and beyond it. | Valid empty ranges perform no I/O; indices within the empty-range boundary are accepted and out-of-range indices are rejected. | `rust_serial_file/tests/buffered_writer.rs` | `validates_empty_block_ranges` | ⏳ Not run |
-| T-013 | `RSF-BW-FR-008`, `RSF-BW-DS-006` | Cause an explicit flush failure and retry after the underlying condition is corrected. | The initial error is returned, pending data remains available for retry, and successful retry writes the expected rows. | `rust_serial_file/tests/buffered_writer.rs` | `retains_pending_rows_after_flush_error` | ⏳ Not run |
-| T-014 | `RSF-BW-RS-002`, `RSF-BW-FR-009` | Cause a direct oversized-block overwrite or append failure. | The error is returned; completed file operations are not rolled back or reported as pending again, and the writer length reflects completed appends. | `rust_serial_file/tests/buffered_writer.rs` | `propagates_oversized_block_write_error` | ⏳ Not run |
-| T-015 | `RSF-BW-FR-010`, `RSF-BW-RS-008` | Confirm that the writer appends only at the logical end, does not insert, and does not expose generic collection operations. | Contiguous appends grow logical length; gaps are rejected; module public API has no insert method or `SerialDataWriter` implementation. | `rust_serial_file/tests/buffered_writer.rs` | `appends_without_inserting_rows` | ⏳ Not run |
-| T-016 | `RSF-BW-DS-002`, `RSF-BW-DS-007` | Stage a write, truncate the file through another handle, then flush. | The writer retains its logical count and propagates the resulting I/O error; it does not reconcile the external change. | `rust_serial_file/tests/buffered_writer.rs` | `keeps_writer_row_count_and_rejects_external_changes` | ⏳ Not run |
+| T-001 | `RSF-BW-FR-001`, `RSF-BW-RS-001` | Construct a writer from a mutable borrow of `FileMetadata`. | The caller retains the metadata owner, and the writer can use it for the duration of its borrow. | `rust_serial_file/tests/buffered_writer.rs` | `constructs_from_borrowed_file_metadata` | ✅ Success |
+| T-002 | `RSF-BW-FR-004`, `RSF-BW-RS-003` | Construct with zero capacity and an unrepresentable or unallocatable cache size. | Construction returns an error without panic or file modification. | `rust_serial_file/tests/buffered_writer.rs` | `rejects_invalid_cache_capacity` | ✅ Success |
+| T-003 | `RSF-BW-FR-002`, `RSF-BW-DS-001`, `RSF-BW-RS-004`, `RSF-BW-RS-006` | Stage a valid single-row overwrite, append at `len()`, and reject incorrect widths and gaps. | Valid bytes overwrite or append exactly one row; length increases on accepted append; invalid inputs return errors without corrupting pending data. | `rust_serial_file/tests/buffered_writer.rs` | `buffers_single_row_writes_and_appends` | ✅ Success |
+| T-004 | `RSF-BW-FR-003`, `RSF-BW-DS-003`, `RSF-BW-RS-005`, `RSF-BW-RS-006` | Stage a block that overwrites existing rows and appends a contiguous suffix; reject misaligned, gapped, or overflowing blocks. | Complete rows are written in order; accepted appended rows increase length immediately; malformed and invalid ranges return errors. | `rust_serial_file/tests/buffered_writer.rs` | `buffers_multiple_rows_and_appends` | ✅ Success |
+| T-005 | `RSF-BW-FR-004`, `RSF-BW-DS-004` | Write rows within one active window, including repeated writes to the same row. | Pending values are updated correctly, and rows not written by the caller remain unchanged. | `rust_serial_file/tests/buffered_writer.rs` | `preserves_untouched_rows_in_cache_window` | ✅ Success |
+| T-006 | `RSF-BW-FR-004`, `RSF-BW-FR-005` | Write outside the active window after staging rows. | The pending window is flushed before the new window is staged; both sets of rows have the expected values. | `rust_serial_file/tests/buffered_writer.rs` | `flushes_on_cache_window_change` | ✅ Success |
+| T-007 | `RSF-BW-FR-005`, `RSF-BW-FR-008` | Fill the active cache window with pending row writes. | The full contiguous cache range is flushed automatically and the end pointer resets. | `rust_serial_file/tests/buffered_writer.rs` | `flushes_when_cache_is_full` | ✅ Success |
+| T-008 | `RSF-BW-FR-005`, `RSF-BW-FR-008` | Explicitly flush pending writes, flush again, and verify file contents. | The first flush writes all pending rows, the second is a no-op, and explicit flush errors are returned. | `rust_serial_file/tests/buffered_writer.rs` | `flushes_explicitly_and_is_idempotent` | ✅ Success |
+| T-009 | `RSF-BW-FR-005`, `RSF-BW-RS-007` | Drop a writer with pending data. | Drop attempts to flush pending data and does not panic. | `rust_serial_file/tests/buffered_writer.rs` | `flushes_pending_rows_on_drop` | ✅ Success |
+| T-010 | `RSF-BW-FR-006`, `RSF-BW-DS-005` | Write an oversized block that overwrites existing rows and appends a suffix while other rows are pending. | Pending cache data is flushed first; the full block is sent to one `FileMetadata::write_rows` call and written in order without cache-sized chunking. | `rust_serial_file/tests/buffered_writer.rs` | `writes_oversized_block_directly_after_flush` | ✅ Success |
+| T-011 | `RSF-BW-FR-007` | Write a block within capacity that does not fit the remaining active window. | Pending rows flush first, then the block is staged in a new window without splitting. | `rust_serial_file/tests/buffered_writer.rs` | `moves_fitting_block_to_new_window` | ✅ Success |
+| T-012 | `RSF-BW-RS-006` | Write an empty block at a valid index, at the one-past-end index, and beyond it. | Valid empty ranges perform no I/O; indices within the empty-range boundary are accepted and out-of-range indices are rejected. | `rust_serial_file/tests/buffered_writer.rs` | `validates_empty_block_ranges` | ✅ Success |
+| T-013 | `RSF-BW-FR-008`, `RSF-BW-DS-006` | Cause an explicit flush failure and retry after the underlying condition is corrected. | The initial error is returned, pending data remains available for retry, and successful retry writes the expected rows. | `rust_serial_file/tests/buffered_writer.rs` | `retains_pending_rows_after_flush_error` | ✅ Success |
+| T-014 | `RSF-BW-RS-002`, `RSF-BW-FR-009` | Cause a direct oversized-block overwrite or append failure. | The error is returned; completed file operations are not rolled back or reported as pending again, and the writer length reflects completed appends. | `rust_serial_file/tests/buffered_writer.rs` | `propagates_oversized_block_write_error` | ✅ Success |
+| T-015 | `RSF-BW-FR-010`, `RSF-BW-RS-008` | Confirm that the writer appends only at the logical end, does not insert, and does not expose generic collection operations. | Contiguous appends grow logical length; gaps are rejected; module public API has no insert method or `SerialDataWriter` implementation. | `rust_serial_file/tests/buffered_writer.rs` | `appends_without_inserting_rows` | ✅ Success |
+| T-016 | `RSF-BW-DS-002`, `RSF-BW-DS-007` | Stage a write, truncate the file through another handle, then flush. | The writer retains its logical count and propagates the resulting I/O error; it does not reconcile the external change. | `rust_serial_file/tests/buffered_writer.rs` | `keeps_writer_row_count_and_rejects_external_changes` | ✅ Success |
+| T-017 | `RSF-BW-DS-002` | Query the logical length of an empty writer. | `len()` returns zero and `is_empty()` returns true. | `rust_serial_file/tests/buffered_writer.rs` | `reports_empty_logical_length` | ✅ Success |
+| T-018 | `RSF-BW-RS-003` | Request a cache allocation too large to reserve. | Cache allocation reports an error rather than panicking. | `rust_serial_file/src/file/buffered_writer.rs` | `reports_cache_allocation_failure` | ✅ Success |
+| T-019 | `RSF-BW-RS-007` | Drop a writer after its pending flush has become invalid due to an external truncation. | Drop makes a best-effort attempt and does not panic. | `rust_serial_file/tests/buffered_writer.rs` | `drop_does_not_panic_when_flush_fails` | ✅ Success |
+| T-020 | `RSF-BW-RS-003` | Construct the default writer for a row wider than the 64 KiB cache target. | The writer uses a one-row cache and successfully writes the row. | `rust_serial_file/tests/buffered_writer.rs` | `defaults_to_one_cache_row_for_rows_wider_than_the_target` | ✅ Success |
+| T-021 | `RSF-BW-FR-004`, `RSF-BW-DS-004` | Write beyond the contiguous cache end, then before the new window start. | Each non-contiguous write flushes the current range first; intervening untouched rows remain unchanged. | `rust_serial_file/tests/buffered_writer.rs` | `flushes_before_starting_a_discontiguous_cache_range` | ✅ Success |
 
 ### Acceptance criteria
 
@@ -393,7 +407,11 @@ remaining uncovered behavior. Do not exclude relevant production code to
 increase the reported percentage.
 
 - Use **⏳ Not run** until coverage has been measured.
-- **Coverage summary:** ⏳ Not run. Implementation has not started.
+- **Coverage summary:** `cargo llvm-cov --all-targets --summary-only`; complete
+  production scope `src/file/buffered_writer.rs`: 100.00% line coverage
+  (137/137 lines), 100.00% function coverage (12/12), and 91.89% region
+  coverage. No production lines remain uncovered. The line-coverage gate
+  required by P-004 is met.
 
 ## Out of scope
 
