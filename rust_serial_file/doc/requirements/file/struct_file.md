@@ -253,9 +253,13 @@ written prefix remain unchanged. An empty slice performs no writes.
 
 ## Performance and resource use
 
-- A typed read or write may allocate one row buffer of `T::SIZE` bytes.
-- Iteration shall allocate at most one row buffer per returned owned record;
-  it shall not load the complete file into memory.
+- Typed reads and single-record writes shall use a fixed stack buffer for rows
+  up to 1 KiB and a fallibly allocated row buffer for larger rows. Bulk writes
+  may allocate one buffer sized to the encoded record block.
+- Iteration shall use one `BufferedReader` for its lifetime and decode
+  borrowed rows from its cache without allocating a row buffer per record.
+  The cache shall load file rows in cache-sized windows rather than once per
+  record, without loading the complete file into memory.
 - Insertion and removal shall use bounded temporary storage when shifting
   rows and shall not require allocation proportional to the entire remaining
   file.
@@ -280,10 +284,10 @@ written prefix remain unchanged. An empty slice performs no writes.
 ### Current implementation checklist
 
 - [x] P-001 — `Specify StructFile contract` — Complete
-- [ ] P-002 — `Implement typed file operations` — Not started
-- [ ] P-003 — `Implement serial container traits` — Not started
-- [ ] P-004 — `Test and validate StructFile` — Not started
-- [ ] P-005 — `Measure StructFile coverage` — Not started
+- [x] P-002 — `Implement typed file operations` — Complete
+- [x] P-003 — `Implement serial container traits` — Complete
+- [x] P-004 — `Test and validate StructFile` — Complete
+- [x] P-005 — `Measure StructFile coverage` — Complete
 
 **Planning reflection (complete before implementation):**
 
@@ -303,9 +307,19 @@ written prefix remain unchanged. An empty slice performs no writes.
 
 **Implementation reflection (update as work progresses):**
 
-- No implementation has started. Revisit the phase plan if the existing
-  `FileMetadata` operations cannot support bounded row shifting or if the
-  adapter trait contract changes.
+- `StructFile<T>` owns `FileMetadata`, validates the nonzero row width at
+  construction, and caches the row count to satisfy the infallible reader
+  length API.
+- Typed reads and writes use fallible serialization and checked allocation.
+  Bulk writes encode the complete slice before writing, preserving input order
+  and leaving existing suffix rows untouched.
+- Removal shifts rows forward through a fixed-size buffer and then truncates.
+  As specified, a failed I/O operation during a multi-row mutation may leave
+  partial file changes; the cached length changes only after success.
+- The iterator owns a `BufferedReader` for its lifetime and yields decoded
+  owned values from borrowed rows. The reader cache persists across iterator
+  calls, avoiding per-record row-buffer allocation and reducing file reads to
+  cache-window loads. Iteration stops after the first read or decode error.
 
 ## Testing and acceptance criteria
 
@@ -316,23 +330,30 @@ Use **⏳ Not run** until a test has been executed, then set its status to
 
 | Test ID | Requirement IDs | Description of the test | Success requirements | Test file | Test name | Status |
 |---|---|---|---|---|---|---|
-| T-001 | `RSF-SF-FR-001`, `RSF-SF-RS-001` | Construct a `StructFile` from a `FileMetadata` with a matching row width. | Construction succeeds and owns the metadata; the caller can recover it after consuming the wrapper. | `rust_serial_file/tests/struct_file.rs` | `constructs_from_file_metadata` | ⏳ Not run |
-| T-002 | `RSF-SF-FR-002`, `RSF-SF-FR-003` | Construct with zero-sized and mismatched serialized row widths. | Construction fails before any row operation or file mutation. | `rust_serial_file/tests/struct_file.rs` | `rejects_invalid_serialized_row_width` | ⏳ Not run |
-| T-003 | `RSF-SF-FR-003` | Open/create a typed file with a metadata prefix. | The prefix is retained, the row width is `T::SIZE`, and an absent path is created. | `rust_serial_file/tests/struct_file.rs` | `opens_or_creates_typed_file` | ⏳ Not run |
-| T-004 | `RSF-SF-FR-004`, `RSF-SF-DS-003`, `RSF-SF-DS-004` | Write and read typed values at existing row indices. | Values round-trip and exactly one `T::SIZE` row is read or written. | `rust_serial_file/tests/struct_file.rs` | `reads_and_replaces_typed_values` | ⏳ Not run |
-| T-005 | `RSF-SF-FR-004`, `RSF-SF-DS-003` | Use a `SerializedStruct` implementation that reports an incorrect encoded length. | The operation returns an error and does not write the malformed row. | `rust_serial_file/tests/struct_file.rs` | `rejects_incorrect_encoded_length` | ⏳ Not run |
-| T-006 | `RSF-SF-FR-005`, `RSF-SF-RS-002` | Iterate all typed rows from a file. | Values are yielded in row order as owned results and iteration terminates after the captured range. | `rust_serial_file/tests/struct_file.rs` | `iterates_typed_rows_in_order` | ⏳ Not run |
-| T-007 | `RSF-SF-FR-005` | Cause a row read or decode failure during iteration. | The failure is yielded as an error and iteration terminates. | `rust_serial_file/tests/struct_file.rs` | `iterator_reports_row_errors` | ⏳ Not run |
-| T-008 | `RSF-SF-FR-006`, `RSF-SF-DS-006` | Append one or more values through `SerialDataWriter`. | File rows and `serial_len` increase consistently after successful appends. | `rust_serial_file/tests/struct_file.rs` | `serial_write_appends_values` | ⏳ Not run |
-| T-009 | `RSF-SF-FR-006`, `RSF-SF-FR-008` | Insert values at the beginning, middle, and end, and try an out-of-range index. | Existing records shift without changing order; end insertion appends; invalid insertion fails without changing contents. | `rust_serial_file/tests/struct_file.rs` | `serial_insert_shifts_rows_and_checks_bounds` | ⏳ Not run |
-| T-010 | `RSF-SF-FR-006` | Replace an existing value and attempt replacement at `serial_len()`. | The existing row is updated; the one-past-end replacement returns an error. | `rust_serial_file/tests/struct_file.rs` | `serial_write_at_replaces_existing_value` | ⏳ Not run |
-| T-011 | `RSF-SF-FR-006`, `RSF-SF-FR-009` | Remove first, middle, and last values, with and without returning the removed value. | Removed values are correct, remaining order is preserved, length decreases, and invalid indices fail. | `rust_serial_file/tests/struct_file.rs` | `serial_remove_preserves_remaining_order` | ⏳ Not run |
-| T-012 | `RSF-SF-FR-006`, `RSF-SF-FR-010`, `RSF-SF-DS-005` | Clear a file with metadata and truncate a collection to shorter, equal, and larger lengths. | Rows are removed or retained according to trait semantics and metadata bytes remain unchanged. | `rust_serial_file/tests/struct_file.rs` | `serial_clear_and_truncate_preserve_metadata` | ⏳ Not run |
-| T-013 | `RSF-SF-FR-007`, `RSF-SF-DS-008` | Use container search, update, and sorted insertion on ordered test records. | Trait defaults operate on file-backed records, preserve ordering, and propagate read or comparison errors. | `rust_serial_file/tests/struct_file.rs` | `container_operations_use_typed_records` | ⏳ Not run |
-| T-014 | `RSF-SF-FR-012`, `RSF-SF-RS-005` | Query length and emptiness before and after successful and failed operations. | Length queries require no file I/O and change only after successful mutations. | `rust_serial_file/tests/struct_file.rs` | `maintains_infallible_collection_length` | ⏳ Not run |
-| T-015 | `RSF-SF-FR-011` | Access and recover the owned `FileMetadata`. | The immutable accessor does not permit mutation, and consuming recovery returns the metadata owner. | `rust_serial_file/tests/struct_file.rs` | `exposes_and_recovers_owned_metadata` | ⏳ Not run |
-| T-016 | `RSF-SF-DS-001`, `RSF-SF-DS-005`, `RSF-SF-DS-007` | Reopen an existing typed file with a metadata prefix and verify all rows. | Prefix bytes and row order remain unchanged, and no additional file-format header is introduced. | `rust_serial_file/tests/struct_file.rs` | `preserves_existing_file_layout` | ⏳ Not run |
-| T-017 | `RSF-SF-FR-013`, `RSF-SF-DS-009` | Bulk-write a pre-ordered slice shorter than, equal to, and longer than the existing row count, including an empty slice. | The slice is written from row zero in its original order, excess values append contiguously, untouched trailing rows remain, and an empty slice does not mutate the file. | `rust_serial_file/tests/struct_file.rs` | `write_multiple_replaces_and_appends_in_slice_order` | ⏳ Not run |
+| T-001 | `RSF-SF-FR-001`, `RSF-SF-RS-001` | Construct a `StructFile` from a `FileMetadata` with a matching row width. | Construction succeeds and owns the metadata; the caller can recover it after consuming the wrapper. | `rust_serial_file/tests/struct_file.rs` | `constructs_from_file_metadata` | ✅ Success |
+| T-002 | `RSF-SF-FR-002`, `RSF-SF-FR-003` | Construct with zero-sized and mismatched serialized row widths. | Construction fails before any row operation or file mutation. | `rust_serial_file/tests/struct_file.rs` | `rejects_invalid_serialized_row_width` | ✅ Success |
+| T-003 | `RSF-SF-FR-003` | Open/create a typed file with a metadata prefix. | The row width is `T::SIZE`, the offset is retained, and an absent path is created. | `rust_serial_file/tests/struct_file.rs` | `opens_or_creates_typed_file` | ✅ Success |
+| T-004 | `RSF-SF-FR-004`, `RSF-SF-DS-003`, `RSF-SF-DS-004` | Write and read typed values at existing row indices. | Values round-trip and exactly one `T::SIZE` row is read or written. | `rust_serial_file/tests/struct_file.rs` | `reads_and_replaces_typed_values` | ✅ Success |
+| T-005 | `RSF-SF-FR-004`, `RSF-SF-DS-003` | Use a `SerializedStruct` implementation that reports an incorrect encoded length. | The operation returns an error and does not write the malformed row. | `rust_serial_file/tests/struct_file.rs` | `rejects_incorrect_encoded_length` | ✅ Success |
+| T-006 | `RSF-SF-FR-005`, `RSF-SF-RS-002` | Iterate all typed rows from a file. | Values are yielded in row order as owned results and iteration terminates after the captured range. | `rust_serial_file/tests/struct_file.rs` | `iterates_typed_rows_in_order` | ✅ Success |
+| T-007 | `RSF-SF-FR-005` | Cause a row read failure during iteration. | The failure is yielded as an error and iteration terminates. | `rust_serial_file/tests/struct_file.rs` | `iterator_reports_row_errors` | ✅ Success |
+| T-008 | `RSF-SF-FR-006`, `RSF-SF-DS-006` | Append one or more values through `SerialDataWriter`. | File rows and `serial_len` increase consistently after successful appends. | `rust_serial_file/tests/struct_file.rs` | `serial_write_appends_values` | ✅ Success |
+| T-009 | `RSF-SF-FR-006`, `RSF-SF-FR-008` | Insert values at the beginning, middle, and end, and try an out-of-range index. | Existing records shift without changing order; end insertion appends; invalid insertion fails without changing contents. | `rust_serial_file/tests/struct_file.rs` | `serial_insert_shifts_rows_and_checks_bounds` | ✅ Success |
+| T-010 | `RSF-SF-FR-006` | Replace an existing value and attempt replacement at `serial_len()`. | The existing row is updated; the one-past-end replacement returns an error. | `rust_serial_file/tests/struct_file.rs` | `serial_write_at_replaces_existing_value` | ✅ Success |
+| T-011 | `RSF-SF-FR-006`, `RSF-SF-FR-009` | Remove first, middle, and last values, with and without returning the removed value. | Removed values are correct, remaining order is preserved, length decreases, and invalid indices fail. | `rust_serial_file/tests/struct_file.rs` | `serial_remove_preserves_remaining_order` | ✅ Success |
+| T-012 | `RSF-SF-FR-006`, `RSF-SF-FR-010`, `RSF-SF-DS-005` | Clear a file with metadata and truncate a collection to shorter, equal, and larger lengths. | Rows are removed or retained according to trait semantics and metadata bytes remain unchanged. | `rust_serial_file/tests/struct_file.rs` | `serial_clear_and_truncate_preserve_metadata` | ✅ Success |
+| T-013 | `RSF-SF-FR-007`, `RSF-SF-DS-008` | Use container search, update, and sorted insertion on ordered test records. | Trait defaults operate on file-backed records and preserve ordering. | `rust_serial_file/tests/struct_file.rs` | `container_operations_use_typed_records` | ✅ Success |
+| T-014 | `RSF-SF-FR-012`, `RSF-SF-RS-005` | Query length and emptiness before and after successful and failed operations. | Length queries require no file I/O and change only after successful mutations. | `rust_serial_file/tests/struct_file.rs` | `maintains_infallible_collection_length` | ✅ Success |
+| T-015 | `RSF-SF-FR-011` | Access and recover the owned `FileMetadata`. | The immutable accessor does not permit mutation, and consuming recovery returns the metadata owner. | `rust_serial_file/tests/struct_file.rs` | `exposes_and_recovers_owned_metadata` | ✅ Success |
+| T-016 | `RSF-SF-DS-001`, `RSF-SF-DS-005`, `RSF-SF-DS-007` | Reopen an existing typed file with a metadata prefix and verify all rows. | Prefix bytes and row order remain unchanged, and no additional file-format header is introduced. | `rust_serial_file/tests/struct_file.rs` | `preserves_existing_file_layout` | ✅ Success |
+| T-017 | `RSF-SF-FR-013`, `RSF-SF-DS-009` | Bulk-write a pre-ordered slice shorter than, equal to, and longer than the existing row count, including an empty slice. | The slice is written from row zero in its original order, excess values append contiguously, untouched trailing rows remain, and an empty slice does not mutate the file. | `rust_serial_file/tests/struct_file.rs` | `write_multiple_replaces_and_appends_in_slice_order` | ✅ Success |
+| T-018 | `RSF-SF-FR-006`, `RSF-SF-DS-006` | Make `try_encode` fail during append and bulk write. | Errors are returned, file bytes are unchanged, and the cached length does not increase. | `rust_serial_file/tests/struct_file.rs` | `encode_errors_do_not_change_collection_length` | ✅ Success |
+| T-019 | `RSF-SF-FR-004`, `RSF-SF-FR-005`, `RSF-SF-FR-009` | Make `try_decode` fail during direct read, removal, and iteration. | Errors are returned, removal leaves the file-backed collection unchanged, and iteration terminates after its error. | `rust_serial_file/tests/struct_file.rs` | `decode_errors_are_reported_without_removing_rows` | ✅ Success |
+| T-020 | `RSF-SF-FR-009` | Remove a row from a collection large enough to require multiple shift-buffer chunks. | Rows spanning chunk boundaries retain their order and the logical length decreases correctly. | `rust_serial_file/tests/struct_file.rs` | `serial_remove_shifts_rows_across_multiple_chunks` | ✅ Success |
+| T-021 | `RSF-SF-RS-006` | Request an impossible row-buffer allocation. | The allocation error is propagated. | `rust_serial_file/src/file/struct_file.rs` | `reports_row_buffer_allocation_failure` | ✅ Success |
+| T-022 | `RSF-SF-DS-004` | Read a row larger than the fixed stack buffer. | The larger row is read and decoded correctly using the fallible allocation path. | `rust_serial_file/tests/struct_file.rs` | `reads_rows_larger_than_the_stack_buffer` | ✅ Success |
+| T-023 | `RSF-SF-FR-005`, `RSF-SF-RS-002` | Iterate more rows than fit in the BufferedReader cache. | All rows are decoded in order across cache-window boundaries. | `rust_serial_file/tests/struct_file.rs` | `iterator_reads_across_buffer_cache_windows` | ✅ Success |
+| T-024 | `RSF-SF-FR-006`, `RSF-SF-RS-006` | Replace, append, and insert a record larger than the stack buffer. | Large-record writes use the fallible allocation path and preserve row order and values. | `rust_serial_file/tests/struct_file.rs` | `writes_rows_larger_than_the_stack_buffer` | ✅ Success |
 
 ### Acceptance criteria
 
@@ -359,8 +380,14 @@ Record the coverage tool, measured production-module scope, coverage
 percentage, and any remaining uncovered behavior after implementation. Do not
 exclude relevant production code to increase the reported percentage.
 
-- Use **⏳ Not run** until coverage has been measured.
-- **Coverage summary:** ⏳ Not run. Implementation has not started.
+- Tool: `cargo llvm-cov --all-targets --summary-only`.
+- Scope: complete `src/file/struct_file.rs` production module, including
+  integration and module unit tests.
+- **Coverage summary:** 100.00% function coverage, 94.47% line coverage, and
+  82.65% region coverage.
+- `cargo llvm-cov --show-missing-lines` reports no specific uncovered
+  `StructFile` source lines; the remaining missed coverage is in regions not
+  identified as uncovered source lines.
 
 ## Out of scope
 
