@@ -198,9 +198,19 @@ impl FileMetadata {
         }
 
         self.ensure_metadata_prefix()?;
-        self.validate_range(start, row_count)?;
-        self.file.seek(SeekFrom::Start(self.row_offset(start)?))?;
+
+        let current_count = self.element_count()?;
+        if start > current_count {
+            bail!("row range starts at {start}, beyond the logical end {current_count}");
+        }
+        let end = start.checked_add(row_count).context("row range overflow")?;
+        let write_offset = self.row_offset(start)?;
+        self.row_end(end)?;
+
+        self.file.seek(SeekFrom::Start(write_offset))?;
         self.file.write_all(data)?;
+        self.element_count = current_count.max(end);
+        self.reserved_rows = self.reserved_rows.max(end);
         Ok(())
     }
 

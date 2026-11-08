@@ -328,12 +328,34 @@ fn reads_contiguous_row_blocks() {
 #[test]
 fn writes_contiguous_row_blocks() {
     let (_directory, mut metadata) = open_metadata(b"abcdef", 2, 0);
-    metadata.write_rows(1, b"WXYZ").unwrap();
-    assert_eq!(read_all(&mut metadata), b"abWXYZ");
-    metadata.write_rows(3, &[]).unwrap();
-    assert_eq!(metadata.file_len().unwrap(), 6);
-    assert!(metadata.write_rows(3, b"xx").is_err());
+    metadata.write_rows(1, b"WXYZ12").unwrap();
+    assert_eq!(read_all(&mut metadata), b"abWXYZ12");
+    assert_eq!(metadata.element_count().unwrap(), 4);
+
+    metadata.write_rows(2, b"qq").unwrap();
+    assert_eq!(read_all(&mut metadata), b"abWXqq12");
+    assert_eq!(metadata.element_count().unwrap(), 4);
+
+    metadata.write_rows(4, b"34").unwrap();
+    assert_eq!(read_all(&mut metadata), b"abWXqq1234");
+    assert_eq!(metadata.element_count().unwrap(), 5);
+
+    metadata.write_rows(5, &[]).unwrap();
+    assert_eq!(metadata.file_len().unwrap(), 10);
+    assert!(metadata.write_rows(6, b"xx").is_err());
     assert!(metadata.write_rows(0, b"x").is_err());
+}
+
+#[test]
+fn writes_rows_into_reserved_capacity_and_updates_logical_count() {
+    let (_directory, mut metadata) = open_metadata(b"abcd", 2, 0);
+    metadata.reserve_rows(4).unwrap();
+
+    metadata.write_rows(2, b"EFGH").unwrap();
+
+    assert_eq!(metadata.file_len().unwrap(), 8);
+    assert_eq!(metadata.element_count().unwrap(), 4);
+    assert_eq!(read_all(&mut metadata), b"abcdEFGH");
 }
 
 #[test]
@@ -378,7 +400,7 @@ fn inserts_rows_and_discards_partial_suffix() {
 }
 
 #[test]
-fn pads_metadata_before_replacement_write_validation() {
+fn pads_metadata_before_nonempty_writes() {
     let (_directory, mut metadata) = open_metadata(b"ab", 2, 4);
     assert!(metadata.write_row(0, b"XY").is_err());
     assert_eq!(metadata.file_len().unwrap(), 4);
@@ -387,8 +409,19 @@ fn pads_metadata_before_replacement_write_validation() {
     assert_eq!(prefix, [b'a', b'b', 0, 0]);
 
     let (_directory, mut metadata) = open_metadata(b"ab", 2, 4);
-    assert!(metadata.write_rows(0, b"XY").is_err());
+    assert!(metadata.write_rows(1, b"XY").is_err());
     assert_eq!(metadata.file_len().unwrap(), 4);
+    let mut prefix = [1; 4];
+    metadata.get_raw_metadata(&mut prefix).unwrap();
+    assert_eq!(prefix, [b'a', b'b', 0, 0]);
+
+    let (_directory, mut metadata) = open_metadata(b"ab", 2, 4);
+    metadata.write_rows(0, b"XY").unwrap();
+    assert_eq!(metadata.file_len().unwrap(), 6);
+    assert_eq!(metadata.element_count().unwrap(), 1);
+    let mut prefix = [1; 4];
+    metadata.get_raw_metadata(&mut prefix).unwrap();
+    assert_eq!(prefix, [b'a', b'b', 0, 0]);
 }
 
 #[test]
