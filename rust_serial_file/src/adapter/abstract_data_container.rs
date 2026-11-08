@@ -223,6 +223,7 @@ mod tests {
             })
             .unwrap();
 
+        assert!(entries[1] == 20);
         assert_eq!(
             entries.iter().map(|entry| entry.key).collect::<Vec<_>>(),
             [10, 20, 30]
@@ -243,6 +244,40 @@ mod tests {
 
         assert_eq!(values.records, [10, 20, 30]);
         assert_eq!(values.read_count, 2);
+    }
+
+    #[test]
+    fn simulated_backend_reader_and_writer_contract_handles_boundaries() {
+        let mut backend = simulated(vec![10, 20]);
+
+        assert_eq!(backend.serial_len(), 2);
+        assert_eq!(backend.serial_get(0).unwrap(), 10);
+        assert!(backend.serial_get(2).is_err());
+        assert_eq!(
+            backend
+                .serial_iter()
+                .unwrap()
+                .collect::<Result<Vec<_>>>()
+                .unwrap(),
+            [10, 20]
+        );
+
+        backend.serial_write(30).unwrap();
+        backend.fail_write = true;
+        assert!(backend.serial_write(40).is_err());
+        backend.fail_write = false;
+        backend.serial_insert(backend.serial_len(), 40).unwrap();
+        assert!(backend.serial_insert(backend.serial_len() + 1, 50).is_err());
+        backend.serial_write_at(0, 5).unwrap();
+        assert!(backend.serial_write_at(backend.serial_len(), 0).is_err());
+        backend.serial_remove(0).unwrap();
+        assert!(backend.serial_remove(backend.serial_len()).is_err());
+        assert_eq!(backend.serial_remove_get(0).unwrap(), 20);
+        assert!(backend.serial_remove_get(backend.serial_len()).is_err());
+        backend.serial_truncate(1).unwrap();
+        backend.serial_truncate(0).unwrap();
+        backend.serial_clear().unwrap();
+        assert!(backend.records.is_empty());
     }
 
     #[test]
@@ -329,6 +364,7 @@ mod tests {
             entries.iter().map(|entry| entry.key).collect::<Vec<_>>(),
             [5, 10, 20, 30, 40]
         );
+        assert!(entries[2] == 20);
         assert_eq!(entries[3].value, "updated");
     }
 
@@ -453,6 +489,48 @@ mod tests {
             .unwrap();
 
         assert_eq!(backend.records, [10, 21, 30]);
+    }
+
+    #[test]
+    fn non_clone_backend_reader_and_writer_contract_handles_boundaries() {
+        let mut backend = NonCloneBackend {
+            records: vec![10, 20],
+        };
+
+        assert_eq!(backend.serial_len(), 2);
+        assert_eq!(backend.serial_get(0).unwrap(), NonCloneRecord(10));
+        assert_eq!(
+            backend
+                .serial_iter()
+                .unwrap()
+                .collect::<Result<Vec<_>>>()
+                .unwrap(),
+            [NonCloneRecord(10), NonCloneRecord(20)]
+        );
+        assert!(backend.serial_get(2).is_err());
+
+        backend.serial_write(NonCloneRecord(30)).unwrap();
+        backend.serial_insert(0, NonCloneRecord(5)).unwrap();
+        assert!(
+            backend
+                .serial_insert(backend.serial_len() + 1, NonCloneRecord(0))
+                .is_err()
+        );
+        backend.serial_write_at(1, NonCloneRecord(10)).unwrap();
+        assert!(
+            backend
+                .serial_write_at(backend.serial_len(), NonCloneRecord(0))
+                .is_err()
+        );
+        backend.serial_remove(0).unwrap();
+        assert!(backend.serial_remove(backend.serial_len()).is_err());
+        assert_eq!(backend.serial_remove_get(1).unwrap(), NonCloneRecord(20));
+        assert!(backend.serial_remove_get(backend.serial_len()).is_err());
+
+        backend.serial_truncate(1).unwrap();
+        backend.serial_truncate(10).unwrap();
+        backend.serial_clear().unwrap();
+        assert!(backend.records.is_empty());
     }
 
     struct SimulatedBackend {

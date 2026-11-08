@@ -277,7 +277,7 @@ is not greater than the record and must propagate undefined comparisons.
 - `serial_update_by_key` was added to update a matching record or pass `None`
   to the closure and insert its result when the key is absent. The insertion
   uses the key-search result directly, avoiding a second lookup.
-- All 9 container tests and all 30 enabled crate tests pass. Formatting,
+- All 14 container tests and all 35 enabled crate tests pass. Formatting,
   Clippy with warnings denied, and `git diff --check` pass.
 
 ## Testing and acceptance criteria
@@ -301,12 +301,15 @@ The tests are implemented in
 | T-010 | RSF-FR-013, RSF-RS-007 | Update a matching key or create an absent key by passing `None` and inserting the returned value at the discovered key position. | Existing records are updated; absent records are inserted in key order. | `rust_serial_file/src/adapter/abstract_data_container.rs` | `update_by_key_updates_or_auto_inserts` | ✅ Success |
 | T-011 | RSF-FR-013 | Exercise search, closure, and write failures during key-based update, including auto-insert write failure. | Failures remain observable; the closure is skipped after search/read failure and no write occurs after closure failure. | `rust_serial_file/src/adapter/abstract_data_container.rs` | `update_by_key_propagates_read_closure_and_write_errors` | ✅ Success |
 | T-012 | RSF-FR-013, RSF-RS-007 | Verify an absent key is inserted at the position found by the initial lookup without a second search or redundant candidate read. | The value is inserted in sorted order using only the two reads required by the binary search. | `rust_serial_file/src/adapter/abstract_data_container.rs` | `update_by_key_reuses_the_missing_key_insertion_position` | ✅ Success |
+| T-013 | RSF-RS-001, RSF-RS-002 | Exercise reader iteration and writer operations, including invalid indexes, using the non-`Clone` contract backend. | All implemented read/write methods preserve values and report invalid indexes. | `rust_serial_file/src/adapter/abstract_data_container.rs` | `non_clone_backend_reader_and_writer_contract_handles_boundaries` | ✅ Success |
+| T-014 | RSF-RS-001, RSF-RS-002 | Exercise simulated backend iteration, all writer operations, and success/failure boundaries. | The test backend contract paths return expected values and failures. | `rust_serial_file/src/adapter/abstract_data_container.rs` | `simulated_backend_reader_and_writer_contract_handles_boundaries` | ✅ Success |
 
 ### Acceptance criteria
 
 1. `SerialDataContainer<T>` publicly extends both reader and writer traits.
-2. `serial_auto_insert`, `serial_update`, and `serial_upsert` have
-   unambiguous ordering, replacement, return, and failure semantics.
+2. `serial_auto_insert`, `serial_update`, `serial_update_by_key`, and
+    `serial_upsert` have unambiguous ordering, replacement, return, and failure
+    semantics.
 3. Optional `serial_get_mut` does not constrain the backend-neutral core
    trait or require persistent backends to return borrowed records.
 4. Tests cover success, boundaries, comparison failures, and simulated
@@ -323,13 +326,15 @@ The tests are implemented in
   'abstract_serial_(read|write)\.rs|serialized_struct' --
   adapter::abstract_data_container::tests`.
 - **Measured scope:** `src/adapter/abstract_data_container.rs`; reader, writer,
-  and serialization modules were excluded. All 12 container tests passed.
-- **Coverage:** 79.13% of lines (364/460), 78.98% of regions (481/609), and
-  68.97% of functions (40/58). This measurement includes inline test support
+  and serialization modules were excluded. All 14 container tests passed.
+- **Coverage:** 98.09% of lines (513/523), 96.98% of regions (738/761), and
+  96.67% of functions (58/60). This measurement includes inline test support
   code in the container source.
 - **Threshold:** None is specified.
-- **Remaining uncovered coverage:** 96 lines, 128 regions, and 18 functions,
-  primarily unexecuted test-support paths and generic instantiations.
+- **Remaining uncovered coverage:** 10 lines, 23 regions, and 2 functions.
+  The remaining missed lines are chiefly the intentionally uninvoked closure
+  bodies in tests confirming a read failure prevents the update closure from
+  running, plus generic monomorphization regions.
 
 ## Out of scope
 
