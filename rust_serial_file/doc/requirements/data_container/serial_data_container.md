@@ -224,15 +224,15 @@ is not greater than the record and must propagate undefined comparisons.
 |---|---|---|---|
 | P-001 | Finalize the composed trait API, `serial_auto_insert`, `serial_update`, key-based `serial_upsert`, and optional mutable-access extension. | None. | Signatures, ordering, replacement, and error semantics are unambiguous and consistent with reader/writer contracts. |
 | P-002 | Add contract and simulated-backend tests for composition, sorted insertion/upsert, update outcomes, ordering failures, and backend failures. | P-001. | Every new behavior and relevant failure case has a test mapped to these requirements. |
-| P-003 | Implement the combined and optional mutable-access traits for `Vec<T>`, preserving non-`Clone` support where possible. | P-001; P-002. | Vector implementation compiles and all successful operations preserve specified values, order, and indexes. |
+| P-003 | Implement the combined and optional mutable-access traits for `Vec<T>`, respecting the reader's `T: Clone` bound; verify the generic container contract can also serve a non-`Clone` record backend. | P-001; P-002. | Vector implementation compiles and operations preserve specified values, order, and indexes; a non-`Clone` backend exercises generic update/insertion. |
 | P-004 | Run focused and crate-level validation, then update test statuses and coverage results. | P-002; P-003. | Tests, formatting, Clippy, and build checks pass; measured coverage scope and results are recorded. |
 
 ### Current implementation checklist
 
-- [ ] P-001 — `Finalize composed container API` — Not started
-- [ ] P-002 — `Implement container contract tests` — Not started
-- [ ] P-003 — `Implement container for Vec<T>` — Not started
-- [ ] P-004 — `Validate container implementation` — Not started
+- [x] P-001 — `Finalize composed container API` — Complete
+- [x] P-002 — `Implement container contract tests` — Complete
+- [x] P-003 — `Implement container for Vec<T>` — Complete
+- [x] P-004 — `Validate container implementation` — Complete; focused and crate tests, formatting, Clippy, whitespace checks, and focused coverage passed.
 
 **Planning reflection:**
 
@@ -247,25 +247,36 @@ is not greater than the record and must propagate undefined comparisons.
   backend failures can interrupt multi-step operations, and upsert must
   preserve ordering under the selected comparison.
 
-**Implementation reflection:** Not started.
+**Implementation reflection:**
+
+- `SerialDataContainer<T>` composes the current reader and writer traits and
+  provides sorted auto-insertion, owned read-modify-write, and keyed upsert.
+- The `Vec<T>` implementation inherits the reader's `T: Clone` bound. A
+  separate non-`Clone` backend test confirms the combined trait methods do not
+  add a `Clone` requirement of their own.
+- `SerialDataContainerMut<T>` is implemented for vectors, while remaining
+  optional for other backends.
+- All 9 container tests and all 30 enabled crate tests pass. Formatting,
+  Clippy with warnings denied, and `git diff --check` pass.
 
 ## Testing and acceptance criteria
 
 ### Tests
 
-The following are planned tests. Their status remains **⏳ Not run** until
-implemented and executed.
+The tests are implemented in
+`rust_serial_file/src/adapter/abstract_data_container.rs`.
 
 | Test ID | Requirement IDs | Description of the test | Success requirements | Test file | Test name | Status |
 |---|---|---|---|---|---|---|
-| T-001 | RSF-FR-001, RSF-RS-001 | Verify a generic caller can use both reader and writer methods through `SerialDataContainer<T>`. | The combined trait exposes inherited operations and preserves their established behavior. | `rust_serial_file/src/adapter/abstract_serial_data_container.rs` | `container_composes_reader_and_writer` | ⏳ Not run |
-| T-002 | RSF-FR-003, RSF-FR-004, RSF-DS-004 | Auto-insert values into an empty, sorted, and unsorted-position vector, including a duplicate. | New values are inserted in order; an equal value replaces the existing record. | `rust_serial_file/src/adapter/abstract_serial_data_container.rs` | `auto_insert_orders_and_replaces_records` | ⏳ Not run |
-| T-003 | RSF-FR-004 | Exercise auto-insert comparison and backend failures. | Each failure is returned and no success is reported. | `rust_serial_file/src/adapter/abstract_serial_data_container.rs` | `auto_insert_propagates_read_and_write_errors` | ⏳ Not run |
-| T-004 | RSF-FR-005, RSF-FR-006 | Update an indexed record successfully and exercise read, closure, and write failures. | Successful updates replace only the requested value; read and closure failures do not proceed to a write. | `rust_serial_file/src/adapter/abstract_serial_data_container.rs` | `update_reads_transforms_and_writes_record` | ⏳ Not run |
-| T-005 | RSF-FR-007, RSF-FR-008, RSF-FR-009 | Upsert a key that is before, equal to, between, and after existing records. | The returned index is correct; matches are replaced and misses inserted in key order. | `rust_serial_file/src/adapter/abstract_serial_data_container.rs` | `upsert_inserts_or_replaces_by_key` | ⏳ Not run |
-| T-006 | RSF-FR-008 | Exercise undefined comparison and simulated read/write errors during upsert. | Errors remain observable and do not produce a successful result. | `rust_serial_file/src/adapter/abstract_serial_data_container.rs` | `upsert_propagates_comparison_and_backend_errors` | ⏳ Not run |
-| T-007 | RSF-FR-010, RSF-FR-011, RSF-RS-005 | Verify optional mutable access on a vector and reject an out-of-range index. | A valid borrow mutates the selected value; invalid access returns an error. | `rust_serial_file/src/adapter/abstract_serial_data_container.rs` | `mutable_extension_returns_checked_vector_access` | ⏳ Not run |
-| T-008 | RSF-RS-002, RSF-RS-003, RSF-RS-004 | Verify update and insertion operations work without imposing `Clone` on the record type. | A non-`Clone` record type compiles and supports operations not requiring cloning. | `rust_serial_file/src/adapter/abstract_serial_data_container.rs` | `container_operations_support_non_clone_records` | ⏳ Not run |
+| T-001 | RSF-FR-001, RSF-RS-001 | Verify a generic caller can use both reader and writer methods through `SerialDataContainer<T>`. | The combined trait exposes inherited operations and preserves their established behavior. | `rust_serial_file/src/adapter/abstract_data_container.rs` | `container_composes_reader_and_writer` | ✅ Success |
+| T-002 | RSF-FR-003, RSF-FR-004, RSF-DS-004 | Auto-insert values into an empty, sorted, and unsorted-position vector, including a duplicate. | New values are inserted in order; an equal value replaces the existing record. | `rust_serial_file/src/adapter/abstract_data_container.rs` | `auto_insert_orders_and_replaces_records` | ✅ Success |
+| T-003 | RSF-FR-003, RSF-FR-004 | Exercise undefined comparison and simulated read/write failures during auto-insertion. | Each failure is returned and no success is reported. | `rust_serial_file/src/adapter/abstract_data_container.rs` | `auto_insert_propagates_read_and_write_errors` | ✅ Success |
+| T-004 | RSF-FR-005 | Update an indexed record successfully. | The specified record is replaced and collection length/order are preserved. | `rust_serial_file/src/adapter/abstract_data_container.rs` | `update_reads_transforms_and_writes_record` | ✅ Success |
+| T-005 | RSF-FR-006 | Exercise read, closure, and write failures during an indexed update. | A read failure skips the closure; a closure failure skips the write; write errors remain observable. | `rust_serial_file/src/adapter/abstract_data_container.rs` | `update_stops_after_read_or_closure_failure_and_propagates_write_errors` | ✅ Success |
+| T-006 | RSF-FR-007, RSF-FR-008, RSF-FR-009 | Upsert a key that is before, equal to, between, and after existing records. | The returned index is correct; matches are replaced and misses inserted in key order. | `rust_serial_file/src/adapter/abstract_data_container.rs` | `upsert_inserts_or_replaces_by_key` | ✅ Success |
+| T-007 | RSF-FR-008 | Exercise undefined comparison and simulated read/write errors during upsert. | Errors remain observable and do not produce a successful result. | `rust_serial_file/src/adapter/abstract_data_container.rs` | `upsert_propagates_read_comparison_and_write_errors` | ✅ Success |
+| T-008 | RSF-FR-010, RSF-FR-011, RSF-RS-005 | Verify optional mutable access on a vector and reject an out-of-range index. | A valid borrow mutates the selected value; invalid access returns an error. | `rust_serial_file/src/adapter/abstract_data_container.rs` | `mutable_extension_returns_checked_vector_access` | ✅ Success |
+| T-009 | RSF-RS-002, RSF-RS-003, RSF-RS-004 | Verify update and insertion operations work without imposing `Clone` on the record type. | A non-`Clone` record type compiles and supports operations not requiring cloning. | `rust_serial_file/src/adapter/abstract_data_container.rs` | `container_operations_support_non_clone_records` | ✅ Success |
 
 ### Acceptance criteria
 
@@ -281,12 +292,20 @@ implemented and executed.
 
 ## Code coverage
 
-Coverage has not yet been measured because implementation and tests have not
-started.
-
-- **Coverage tool:** Not run.
-- **Measured scope:** Not measured.
-- **Coverage summary:** To be recorded after implementation.
+- **Coverage tool:** `cargo-llvm-cov 0.9.1` with `llvm-tools-preview`.
+- **Command:** `cargo llvm-cov clean --manifest-path rust_serial_file\Cargo.toml`,
+  followed by `cargo llvm-cov --manifest-path rust_serial_file\Cargo.toml
+  --all-targets --ignore-filename-regex
+  'abstract_serial_(read|write)\.rs|serialized_struct' --
+  adapter::abstract_data_container::tests`.
+- **Measured scope:** `src/adapter/abstract_data_container.rs`; reader, writer,
+  and serialization modules were excluded. All 9 container tests passed.
+- **Coverage:** 74.08% of lines (263/355), 73.68% of regions (350/475), and
+  64.44% of functions (29/45). This measurement includes inline test support
+  code in the container source.
+- **Threshold:** None is specified.
+- **Remaining uncovered coverage:** 92 lines, 125 regions, and 16 functions,
+  primarily unexecuted test-support paths and generic instantiations.
 
 ## Out of scope
 
