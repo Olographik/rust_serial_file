@@ -36,6 +36,33 @@ pub trait SerialDataContainer<T>: SerialDataReader<T> + SerialDataWriter<T> {
         self.serial_write_at(index, replacement)
     }
 
+    /// Reads, transforms, and replaces the record matching `key`.
+    ///
+    /// If there is no matching record, `update` receives `None` and its result
+    /// is inserted at the key's discovered sorted position. The result must
+    /// compare consistently with `key`, since the discovered position is
+    /// reused rather than searched again. The update closure is called exactly
+    /// once.
+    fn serial_update_by_key<K, F>(&mut self, key: &K, update: F) -> Result<()>
+    where
+        T: PartialOrd<K>,
+        F: FnOnce(Option<T>) -> Result<T>,
+    {
+        let (index, found) = find_insert_position(self, key)?;
+        let current = if found {
+            Some(self.serial_get(index)?)
+        } else {
+            None
+        };
+        let replacement = update(current)?;
+
+        if found {
+            self.serial_write_at(index, replacement)
+        } else {
+            self.serial_insert(index, replacement)
+        }
+    }
+
     /// Replaces a record matching `key`, or inserts `value` at its sorted
     /// position, returning the affected index.
     ///
@@ -70,28 +97,24 @@ where
     let len = container.serial_len();
     let mut lower = 0;
     let mut upper = len;
+    let mut upper_ordering = None;
 
     while lower < upper {
         let middle = lower + (upper - lower) / 2;
         let record = container.serial_get(middle)?;
-        match record
+        let ordering = record
             .partial_cmp(key)
-            .ok_or(SerialDataReaderError::UndefinedOrdering)?
-        {
+            .ok_or(SerialDataReaderError::UndefinedOrdering)?;
+        match ordering {
             std::cmp::Ordering::Less => lower = middle + 1,
-            std::cmp::Ordering::Equal | std::cmp::Ordering::Greater => upper = middle,
+            std::cmp::Ordering::Equal | std::cmp::Ordering::Greater => {
+                upper = middle;
+                upper_ordering = Some(ordering);
+            }
         }
     }
 
-    let found = if lower < len {
-        container
-            .serial_get(lower)?
-            .partial_cmp(key)
-            .ok_or(SerialDataReaderError::UndefinedOrdering)?
-            == std::cmp::Ordering::Equal
-    } else {
-        false
-    };
+    let found = lower < len && upper_ordering == Some(std::cmp::Ordering::Equal);
 
     Ok((lower, found))
 }
@@ -150,6 +173,76 @@ mod tests {
         values.serial_update(1, |record| Ok(record + 5)).unwrap();
 
         assert_eq!(values, [10, 25, 30]);
+    }
+
+    #[test]
+    fn update_by_key_updates_or_auto_inserts() {
+        #[derive(Clone, Debug, PartialEq, Eq, PartialOrd)]
+        struct Entry {
+            key: i32,
+            value: &'static str,
+        }
+
+        impl PartialEq<i32> for Entry {
+            fn eq(&self, other: &i32) -> bool {
+                self.key == *other
+            }
+        }
+
+        impl PartialOrd<i32> for Entry {
+            fn partial_cmp(&self, other: &i32) -> Option<Ordering> {
+                self.key.partial_cmp(other)
+            }
+        }
+
+        let mut entries = vec![
+            Entry {
+                key: 10,
+                value: "ten",
+            },
+            Entry {
+                key: 30,
+                value: "thirty",
+            },
+        ];
+
+        entries
+            .serial_update_by_key(&30, |current| {
+                let mut entry = current.expect("key should exist");
+                entry.value = "updated";
+                Ok(entry)
+            })
+            .unwrap();
+        entries
+            .serial_update_by_key(&20, |current| {
+                assert!(current.is_none());
+                Ok(Entry {
+                    key: 20,
+                    value: "twenty",
+                })
+            })
+            .unwrap();
+
+        assert_eq!(
+            entries.iter().map(|entry| entry.key).collect::<Vec<_>>(),
+            [10, 20, 30]
+        );
+        assert_eq!(entries[2].value, "updated");
+    }
+
+    #[test]
+    fn update_by_key_reuses_the_missing_key_insertion_position() {
+        let mut values = simulated(vec![10, 30]);
+
+        values
+            .serial_update_by_key(&20, |record| {
+                assert_eq!(record, None);
+                Ok(20)
+            })
+            .unwrap();
+
+        assert_eq!(values.records, [10, 20, 30]);
+        assert_eq!(values.read_count, 2);
     }
 
     #[test]
@@ -366,6 +459,7 @@ mod tests {
         records: Vec<i32>,
         fail_read_at: Option<usize>,
         fail_write: bool,
+        read_count: usize,
     }
 
     fn clone_record(record: &i32) -> Result<i32> {
@@ -383,6 +477,7 @@ mod tests {
         }
 
         fn serial_get(&mut self, index: usize) -> Result<i32> {
+            self.read_count += 1;
             if self.fail_read_at == Some(index) {
                 return Err(anyhow!("simulated read failure"));
             }
@@ -467,6 +562,7 @@ mod tests {
             records,
             fail_read_at: None,
             fail_write: false,
+            read_count: 0,
         }
     }
 
@@ -539,5 +635,51 @@ mod tests {
 
         let mut unordered = vec![1.0_f64, f64::NAN, 3.0];
         assert!(unordered.serial_upsert(&2.0, 2.0).is_err());
+    }
+
+    #[test]
+    fn update_by_key_propagates_read_closure_and_write_errors() {
+        let mut reader_failure = simulated(vec![10, 20, 30]);
+        reader_failure.fail_read_at = Some(1);
+        let mut called = false;
+        assert!(
+            reader_failure
+                .serial_update_by_key(&20, |record| {
+                    called = true;
+                    Ok(record.unwrap_or_default())
+                })
+                .is_err()
+        );
+        assert!(!called);
+        assert_eq!(reader_failure.records, [10, 20, 30]);
+
+        let mut closure_failure = simulated(vec![10, 30]);
+        assert!(
+            closure_failure
+                .serial_update_by_key(&20, |_| Err(anyhow!("update failure")))
+                .unwrap_err()
+                .to_string()
+                .contains("update failure")
+        );
+        assert_eq!(closure_failure.records, [10, 30]);
+
+        let mut write_failure = simulated(vec![10, 20, 30]);
+        write_failure.fail_write = true;
+        assert!(
+            write_failure
+                .serial_update_by_key(&20, |record| Ok(record.unwrap_or_default() + 1))
+                .is_err()
+        );
+        assert_eq!(write_failure.records, [10, 20, 30]);
+
+        let mut missing_key_write_failure = simulated(vec![10, 30]);
+        missing_key_write_failure.fail_write = true;
+        assert!(
+            missing_key_write_failure
+                .serial_update_by_key(&20, |record| Ok(record.unwrap_or_default() + 20))
+                .is_err()
+        );
+        assert_eq!(missing_key_write_failure.records, [10, 30]);
+        assert_eq!(missing_key_write_failure.read_count, 2);
     }
 }

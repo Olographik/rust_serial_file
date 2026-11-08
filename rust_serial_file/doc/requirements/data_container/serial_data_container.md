@@ -94,10 +94,11 @@ from the reader and writer retain their existing contracts.
 | RSF-FR-006 | `serial_update` shall not invoke the update closure when the initial read fails. If the closure fails, it shall not write a replacement. Backend write failure behavior shall follow the writer's documented partial-failure guarantees. |
 | RSF-FR-007 | `serial_upsert(key, value)` shall use `T: PartialOrd<K>` to find the key's sorted position. It shall replace a record whose comparison is `Equal`, insert before the first record comparing `Greater`, or append if all records compare `Less`. It shall return the index that was inserted or replaced. |
 | RSF-FR-008 | `serial_upsert` shall report read, comparison, and write failures as errors. The supplied value shall be consistent with the key ordering so the collection remains ordered after insertion or replacement. |
-| RSF-FR-009 | Read-modify-write operations shall preserve logical length and order except for the explicitly described insertion behavior of `serial_auto_insert` and `serial_upsert`. |
+| RSF-FR-009 | Read-modify-write operations shall preserve logical length and order except for the explicitly described insertion behavior of `serial_auto_insert`, `serial_update_by_key`, and `serial_upsert`. |
 | RSF-FR-010 | The core `SerialDataContainer<T>` contract shall not require returning a reference into backend storage. A separate optional `SerialDataContainerMut<T>` extension may provide `serial_get_mut(index) -> anyhow::Result<&mut T>` for backends that can safely support it. |
 | RSF-FR-011 | `serial_get_mut` shall return a distinguishable out-of-range error and shall not be required for file, SQL, or other backends that cannot provide a stable mutable borrow. |
 | RSF-FR-012 | Implementations shall maintain consistency between the reader's logical contents and the writer's mutations; successful writes shall be visible to subsequent reads on the same container. |
+| RSF-FR-013 | `serial_update_by_key(key, update)` shall find the matching record and pass it as `Some(T)` to the one-shot update closure. If no record matches, it shall pass `None` and insert the closure's returned record at the already-discovered sorted position, without performing another search. The returned record shall compare consistently with `key`, and the closure shall be invoked exactly once. |
 
 ### Data and serialization
 
@@ -118,6 +119,7 @@ from the reader and writer retain their existing contracts.
 | RSF-RS-004 | `serial_upsert<K>` shall require `T: PartialOrd<K>` only for that operation. |
 | RSF-RS-005 | The optional mutable-access extension shall express the borrow lifetime in its return type and shall only be implemented where the backend can uphold Rust's exclusive-borrow guarantees. |
 | RSF-RS-006 | The traits shall use the crate's established Rust edition and MSRV; this document does not set a separate edition or MSRV. |
+| RSF-RS-007 | `serial_update_by_key` shall require `T: PartialOrd<K>` to locate a key; it shall not require a second ordering comparison or lookup to insert at the discovered position. |
 
 ## Public API
 
@@ -134,6 +136,15 @@ pub trait SerialDataContainer<T>:
     fn serial_update<F>(&mut self, index: usize, update: F) -> anyhow::Result<()>
     where
         F: FnOnce(T) -> anyhow::Result<T>;
+
+    fn serial_update_by_key<K, F>(
+        &mut self,
+        key: &K,
+        update: F,
+    ) -> anyhow::Result<()>
+    where
+        T: PartialOrd<K>,
+        F: FnOnce(Option<T>) -> anyhow::Result<T>;
 
     fn serial_upsert<K>(&mut self, key: &K, value: T) -> anyhow::Result<usize>
     where
@@ -154,6 +165,11 @@ pub trait SerialDataContainerMut<T>: SerialDataContainer<T> {
 - `serial_update` reads one owned value, applies the closure, then writes its
   replacement at the original index. A successful update does not change the
   collection length.
+- `serial_update_by_key` passes the matching owned record as `Some(record)`;
+  if no record matches, it passes `None` and inserts the returned value at the
+  already-discovered sorted position, avoiding a repeated lookup. The returned
+  value must compare consistently with the search key. Existing matches are
+  replaced at their matched index.
 - `serial_upsert` compares records with the supplied key, replaces an equal
   record, or inserts at the key's sorted position. Its returned index identifies
   the replaced or newly inserted record.
@@ -171,6 +187,8 @@ is not greater than the record and must propagate undefined comparisons.
   by their respective trait contracts.
 - `serial_auto_insert` and `serial_upsert` shall surface errors encountered
   while reading, comparing, inserting, or replacing.
+- `serial_update_by_key` shall surface search/read, closure, comparison, and
+  write failures. A read or closure failure shall not be followed by a write.
 - `serial_update` shall surface the indexed read error, closure error, or
   writer error. It shall not call the closure after a read failure or write
   after a closure error.
@@ -223,7 +241,7 @@ is not greater than the record and must propagate undefined comparisons.
 | Phase ID | Phase and implementation steps | Dependencies | Completion criteria |
 |---|---|---|---|
 | P-001 | Finalize the composed trait API, `serial_auto_insert`, `serial_update`, key-based `serial_upsert`, and optional mutable-access extension. | None. | Signatures, ordering, replacement, and error semantics are unambiguous and consistent with reader/writer contracts. |
-| P-002 | Add contract and simulated-backend tests for composition, sorted insertion/upsert, update outcomes, ordering failures, and backend failures. | P-001. | Every new behavior and relevant failure case has a test mapped to these requirements. |
+| P-002 | Add contract and simulated-backend tests for composition, sorted insertion/upsert, index- and key-based update outcomes, ordering failures, and backend failures. | P-001. | Every new behavior and relevant failure case has a test mapped to these requirements. |
 | P-003 | Implement the combined and optional mutable-access traits for `Vec<T>`, respecting the reader's `T: Clone` bound; verify the generic container contract can also serve a non-`Clone` record backend. | P-001; P-002. | Vector implementation compiles and operations preserve specified values, order, and indexes; a non-`Clone` backend exercises generic update/insertion. |
 | P-004 | Run focused and crate-level validation, then update test statuses and coverage results. | P-002; P-003. | Tests, formatting, Clippy, and build checks pass; measured coverage scope and results are recorded. |
 
@@ -256,6 +274,9 @@ is not greater than the record and must propagate undefined comparisons.
   add a `Clone` requirement of their own.
 - `SerialDataContainerMut<T>` is implemented for vectors, while remaining
   optional for other backends.
+- `serial_update_by_key` was added to update a matching record or pass `None`
+  to the closure and insert its result when the key is absent. The insertion
+  uses the key-search result directly, avoiding a second lookup.
 - All 9 container tests and all 30 enabled crate tests pass. Formatting,
   Clippy with warnings denied, and `git diff --check` pass.
 
@@ -277,6 +298,9 @@ The tests are implemented in
 | T-007 | RSF-FR-008 | Exercise undefined comparison and simulated read/write errors during upsert. | Errors remain observable and do not produce a successful result. | `rust_serial_file/src/adapter/abstract_data_container.rs` | `upsert_propagates_read_comparison_and_write_errors` | ✅ Success |
 | T-008 | RSF-FR-010, RSF-FR-011, RSF-RS-005 | Verify optional mutable access on a vector and reject an out-of-range index. | A valid borrow mutates the selected value; invalid access returns an error. | `rust_serial_file/src/adapter/abstract_data_container.rs` | `mutable_extension_returns_checked_vector_access` | ✅ Success |
 | T-009 | RSF-RS-002, RSF-RS-003, RSF-RS-004 | Verify update and insertion operations work without imposing `Clone` on the record type. | A non-`Clone` record type compiles and supports operations not requiring cloning. | `rust_serial_file/src/adapter/abstract_data_container.rs` | `container_operations_support_non_clone_records` | ✅ Success |
+| T-010 | RSF-FR-013, RSF-RS-007 | Update a matching key or create an absent key by passing `None` and inserting the returned value at the discovered key position. | Existing records are updated; absent records are inserted in key order. | `rust_serial_file/src/adapter/abstract_data_container.rs` | `update_by_key_updates_or_auto_inserts` | ✅ Success |
+| T-011 | RSF-FR-013 | Exercise search, closure, and write failures during key-based update, including auto-insert write failure. | Failures remain observable; the closure is skipped after search/read failure and no write occurs after closure failure. | `rust_serial_file/src/adapter/abstract_data_container.rs` | `update_by_key_propagates_read_closure_and_write_errors` | ✅ Success |
+| T-012 | RSF-FR-013, RSF-RS-007 | Verify an absent key is inserted at the position found by the initial lookup without a second search or redundant candidate read. | The value is inserted in sorted order using only the two reads required by the binary search. | `rust_serial_file/src/adapter/abstract_data_container.rs` | `update_by_key_reuses_the_missing_key_insertion_position` | ✅ Success |
 
 ### Acceptance criteria
 
@@ -299,12 +323,12 @@ The tests are implemented in
   'abstract_serial_(read|write)\.rs|serialized_struct' --
   adapter::abstract_data_container::tests`.
 - **Measured scope:** `src/adapter/abstract_data_container.rs`; reader, writer,
-  and serialization modules were excluded. All 9 container tests passed.
-- **Coverage:** 74.08% of lines (263/355), 73.68% of regions (350/475), and
-  64.44% of functions (29/45). This measurement includes inline test support
+  and serialization modules were excluded. All 12 container tests passed.
+- **Coverage:** 79.13% of lines (364/460), 78.98% of regions (481/609), and
+  68.97% of functions (40/58). This measurement includes inline test support
   code in the container source.
 - **Threshold:** None is specified.
-- **Remaining uncovered coverage:** 92 lines, 125 regions, and 16 functions,
+- **Remaining uncovered coverage:** 96 lines, 128 regions, and 18 functions,
   primarily unexecuted test-support paths and generic instantiations.
 
 ## Out of scope
