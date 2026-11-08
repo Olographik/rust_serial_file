@@ -2,7 +2,7 @@
 
 - **Date:** 2026-11-08
 - **Author:** `Olographik`
-- **Revision:** 0.6
+- **Revision:** 0.7
 - **Short description:** Define a non-generic owned-file wrapper for metadata and unbuffered fixed-size row operations.
 
 ## Table of contents
@@ -17,8 +17,8 @@
 - [Compatibility](#compatibility)
 - [Performance and resource use](#performance-and-resource-use)
 - [Phases](#phases)
-  - [Phase planning and reflection](#phase-planning-and-reflection)
-  - [Current implementation checklist](#current-implementation-checklist)
+    - [Phase planning and reflection](#phase-planning-and-reflection)
+    - [Current implementation checklist](#current-implementation-checklist)
 - [Testing and acceptance criteria](#testing-and-acceptance-criteria)
 - [Code coverage](#code-coverage)
 - [Out of scope](#out-of-scope)
@@ -62,8 +62,8 @@ handles, cloning, or coordination needed for concurrent access.
   buffers, without per-row output allocations.
 - Append a row after the existing complete rows and insert a row at a selected
   row index while preserving the order and bytes of later row data.
-- Reserve physical storage for a requested row count, extending and
-  zero-initializing the file as needed.
+- Extend the file length to reserve capacity for a requested row count,
+  without increasing the current instance's logical row count.
 - Iterate read-only over all rows or a selected row range using a
   caller-provided reusable buffer.
 - Provide conventional Rust iterator APIs for all rows and selected ranges,
@@ -78,9 +78,8 @@ handles, cloning, or coordination needed for concurrent access.
   behavior.
 - Define ownership of the file handle and leave any additional handles or
   concurrency coordination to the caller.
-- Define raw metadata access, metadata resizing, row truncation, and
-  unbuffered single-row and block row I/O, append, insertion, and physical
-  row-storage reservation.
+- Define raw metadata access, metadata resizing, row truncation, unbuffered
+  single-row and block row I/O, append, insertion, and row-capacity reservation.
 - Define allocation-free read-only iteration over the full row set and a
   selected row range.
 - Define standard `Iterator` implementations for row iteration, including
@@ -107,9 +106,11 @@ handles, cloning, or coordination needed for concurrent access.
 - Metadata and row reads fill caller-provided mutable byte slices. The caller
   chooses and owns the buffers, so these read methods do not require a heap
   allocation.
-- Physical row reservation depends on an operating-system and filesystem
-  mechanism that guarantees storage allocation; unsupported environments
-  shall return an error rather than silently fall back to sparse extension.
+- Row capacity reservation extends logical file length only; it does not
+  guarantee physical disk-block allocation and may create a sparse extension.
+- Reserved capacity and logical row count are tracked only by the current
+  wrapper instance. Reopening derives the row count from file length, so
+  previously reserved rows then appear as logical rows.
 - File length is queried from the file handle when requested and is not a
   cached snapshot.
 - Existing project Rust edition, MSRV, and dependency policies apply.
@@ -118,74 +119,74 @@ handles, cloning, or coordination needed for concurrent access.
 
 ### Functional requirements
 
-| ID | Requirement |
-|---|---|
-| `RSF-FILE-FR-001` | The component shall provide a public file metadata wrapper that reports the underlying file's current physical length in bytes. |
-| `RSF-FILE-FR-002` | The wrapper shall describe file contents as a sequence of fixed-size elements using a runtime element size greater than zero. |
-| `RSF-FILE-FR-003` | The wrapper shall report the number of complete elements in the data region, excluding any bytes before the configured data offset. |
-| `RSF-FILE-FR-004` | The wrapper shall allow a caller to configure a data offset marking the start of the row region; the first `data_offset` bytes are the in-file metadata. |
-| `RSF-FILE-FR-005` | The wrapper shall not require, store, or be parameterized by an element struct or generic type `T`. |
-| `RSF-FILE-FR-006` | The wrapper shall take ownership of the `File` passed to it and shall not introduce reference-counted sharing. |
-| `RSF-FILE-FR-007` | The wrapper shall not implement `Clone`; callers are responsible for creating and coordinating any additional file handles. |
-| `RSF-FILE-FR-008` | Length and element-count queries shall observe the current file length when called, including changes made through caller-managed handles or external operations. |
-| `RSF-FILE-FR-009` | The component shall provide a path-based constructor that opens an existing file or creates it when it does not exist. Opening an existing file shall preserve its contents. |
-| `RSF-FILE-FR-010` | The component shall provide `get_raw_metadata`, filling a caller-provided buffer with exactly the first `data_offset` bytes. |
+| ID                | Requirement                                                                                                                                                                                                                       |
+| ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `RSF-FILE-FR-001` | The component shall provide a public file metadata wrapper that reports the underlying file's current physical length in bytes.                                                                                                   |
+| `RSF-FILE-FR-002` | The wrapper shall describe file contents as a sequence of fixed-size elements using a runtime element size greater than zero.                                                                                                     |
+| `RSF-FILE-FR-003` | The wrapper shall report the number of complete elements in the data region, excluding any bytes before the configured data offset.                                                                                               |
+| `RSF-FILE-FR-004` | The wrapper shall allow a caller to configure a data offset marking the start of the row region; the first `data_offset` bytes are the in-file metadata.                                                                          |
+| `RSF-FILE-FR-005` | The wrapper shall not require, store, or be parameterized by an element struct or generic type `T`.                                                                                                                               |
+| `RSF-FILE-FR-006` | The wrapper shall take ownership of the `File` passed to it and shall not introduce reference-counted sharing.                                                                                                                    |
+| `RSF-FILE-FR-007` | The wrapper shall not implement `Clone`; callers are responsible for creating and coordinating any additional file handles.                                                                                                       |
+| `RSF-FILE-FR-008` | Length and element-count queries shall observe the current file length when called, including changes made through caller-managed handles or external operations.                                                                 |
+| `RSF-FILE-FR-009` | The component shall provide a path-based constructor that opens an existing file or creates it when it does not exist. Opening an existing file shall preserve its contents.                                                      |
+| `RSF-FILE-FR-010` | The component shall provide `get_raw_metadata`, filling a caller-provided buffer with exactly the first `data_offset` bytes.                                                                                                      |
 | `RSF-FILE-FR-011` | The component shall provide a metadata update operation that replaces the raw metadata and preserves all row-region bytes; if metadata length changes, the row region shall be moved to begin immediately after the new metadata. |
-| `RSF-FILE-FR-012` | The component shall provide `truncate_rows(row_count)`, retaining the first `row_count` rows and removing rows after them without modifying metadata. |
-| `RSF-FILE-FR-013` | The component shall provide `truncate_rows_front(row_count)`, removing rows from the beginning and retaining exactly the last `row_count` rows, without modifying metadata. |
-| `RSF-FILE-FR-014` | The component shall provide unbuffered row reads and writes addressed by row index; row payloads shall be raw bytes of exactly the configured element size. |
-| `RSF-FILE-FR-015` | The component shall expose read-only `data_offset()` and `element_size()` accessors for the corresponding configuration values. |
-| `RSF-FILE-FR-016` | The component shall provide read-only iteration over all complete rows and over an explicitly selected row range, filling a caller-provided reusable buffer for each row. |
-| `RSF-FILE-FR-017` | The component shall provide standard Rust iterators over all complete rows and over an explicitly selected row range, yielding each row as a fallible owned byte vector. |
-| `RSF-FILE-FR-018` | The component shall provide `read_rows` to read a contiguous range of complete rows into an exact-size caller-provided byte buffer. |
-| `RSF-FILE-FR-019` | The component shall provide `write_rows` to write a contiguous range of complete rows from a caller-provided byte buffer without appending rows. |
-| `RSF-FILE-FR-020` | The component shall provide `append_row` to add one row after the existing complete rows. |
-| `RSF-FILE-FR-021` | The component shall provide `insert_row` to insert one row before the existing row at `index`, shifting subsequent row data to preserve it. Insertion at the row count shall append. |
-| `RSF-FILE-FR-022` | Non-empty row-writing, append, and insertion operations shall ensure the metadata prefix exists by zero-filling missing bytes up to `data_offset`, without changing any existing prefix bytes. |
-| `RSF-FILE-FR-023` | The component shall provide `reserve_rows(new_count)` to ensure physical storage for `new_count` rows, increasing the file's complete row count when `new_count` exceeds its current count. |
+| `RSF-FILE-FR-012` | The component shall provide `truncate_rows(row_count)`, retaining the first `row_count` rows and removing rows after them without modifying metadata.                                                                             |
+| `RSF-FILE-FR-013` | The component shall provide `truncate_rows_front(row_count)`, removing rows from the beginning and retaining exactly the last `row_count` rows, without modifying metadata.                                                       |
+| `RSF-FILE-FR-014` | The component shall provide unbuffered row reads and writes addressed by row index; row payloads shall be raw bytes of exactly the configured element size.                                                                       |
+| `RSF-FILE-FR-015` | The component shall expose read-only `data_offset()` and `element_size()` accessors for the corresponding configuration values.                                                                                                   |
+| `RSF-FILE-FR-016` | The component shall provide read-only iteration over all complete rows and over an explicitly selected row range, filling a caller-provided reusable buffer for each row.                                                         |
+| `RSF-FILE-FR-017` | The component shall provide standard Rust iterators over all complete rows and over an explicitly selected row range, yielding each row as a fallible owned byte vector.                                                          |
+| `RSF-FILE-FR-018` | The component shall provide `read_rows` to read a contiguous range of complete rows into an exact-size caller-provided byte buffer.                                                                                               |
+| `RSF-FILE-FR-019` | The component shall provide `write_rows` to write a contiguous range of complete rows from a caller-provided byte buffer without appending rows.                                                                                  |
+| `RSF-FILE-FR-020` | The component shall provide `append_row` to add one row after the existing complete rows.                                                                                                                                         |
+| `RSF-FILE-FR-021` | The component shall provide `insert_row` to insert one row before the existing row at `index`, shifting subsequent row data to preserve it. Insertion at the row count shall append.                                              |
+| `RSF-FILE-FR-022` | Non-empty row-writing, append, and insertion operations shall ensure the metadata prefix exists by zero-filling missing bytes up to `data_offset`, without changing any existing prefix bytes.                                    |
+| `RSF-FILE-FR-023` | The component shall provide `reserve_rows(new_count)` to extend the file to hold at least `new_count` rows without increasing the current instance's logical row count.                                                           |
 
 ### Data and serialization
 
-| ID | Requirement |
-|---|---|
-| `RSF-FILE-DS-001` | The reported file length shall be the physical length in bytes, including any leading metadata and any trailing incomplete element bytes. |
-| `RSF-FILE-DS-002` | The element count shall be `floor((file_len - data_offset) / element_size)` when `file_len` is greater than `data_offset`; it shall be zero when the file length is less than or equal to the offset. |
-| `RSF-FILE-DS-003` | Bytes remaining after the last complete element shall be treated as invalid trailing data and shall not contribute to the element count or be returned as a row. Read/count operations shall leave these bytes unchanged. |
-| `RSF-FILE-DS-004` | Element size and data offset shall be interpreted as byte counts and shall not depend on the layout or size of a Rust type. |
-| `RSF-FILE-DS-005` | The first `data_offset` bytes shall be the complete raw metadata region. Metadata length is exactly `data_offset`; metadata updates set the new offset to the new metadata byte length. |
-| `RSF-FILE-DS-006` | Updating metadata shall preserve the byte sequence of the entire row region, including any trailing incomplete-row bytes, while shifting it by the metadata-length difference. |
-| `RSF-FILE-DS-007` | `truncate_rows(n)` shall retain rows `[0, n)`; `truncate_rows_front(n)` shall retain the last `n` rows, compacted to begin at `data_offset`. Both operations shall discard trailing incomplete-row bytes and shall leave the metadata bytes unchanged. |
-| `RSF-FILE-DS-008` | A row read or write shall address byte range `[data_offset + index * element_size, data_offset + (index + 1) * element_size)`. Reads shall require an existing complete row. Writes shall replace an existing complete row and shall not append, create sparse gaps, or change the data-region length; the metadata prefix may be padded as specified by `RSF-FILE-DS-015`. |
-| `RSF-FILE-DS-009` | Full iteration shall visit complete rows in ascending index order from zero through the row count captured when the iterator is created. Range iteration shall visit rows `[start, start + count)` in ascending order, with the range validated against the row count at iterator creation. |
-| `RSF-FILE-DS-010` | Standard iterator items shall be `anyhow::Result<Vec<u8>>`; each successful item shall contain exactly one complete row. The iterator shall end after its captured row range and shall report row read failures as `Err` items. |
-| `RSF-FILE-DS-011` | A block buffer shall contain a concatenation of complete rows in ascending file order. Its byte length shall be an exact multiple of `element_size`; the number of rows is the buffer length divided by `element_size`. |
-| `RSF-FILE-DS-012` | A block operation shall address rows `[start, start + block_row_count)`. It shall reject overflowing ranges before file mutation and out-of-bounds ranges without extending the data region. A non-empty block write shall first ensure the metadata prefix exists as specified by `RSF-FILE-DS-015`; an empty buffer shall be a no-op when `start` is at most the current row count. |
-| `RSF-FILE-DS-013` | `append_row` shall write exactly one complete row at the byte position immediately after the existing complete rows. It shall overwrite any incomplete trailing bytes and truncate the file immediately after the appended row. |
-| `RSF-FILE-DS-014` | `insert_row(index, row)` shall place the supplied row before the complete row at `index`, shift subsequent complete rows by one element width, and discard any incomplete trailing bytes. The valid index range is `0..=element_count`; inserting at `element_count` is equivalent to appending. |
-| `RSF-FILE-DS-015` | Before a non-empty row write, append, or insertion proceeds, if the physical file is shorter than `data_offset`, the operation shall extend it to `data_offset` with zero bytes without changing any existing file bytes. |
-| `RSF-FILE-DS-016` | When `new_count` exceeds the current complete row count, `reserve_rows` shall ensure the file length is `data_offset + new_count * element_size`, with newly extended bytes reading as zero. Existing bytes, including any incomplete trailing suffix, shall remain at their original offsets; the suffix may consequently form part of a newly reserved row. |
+| ID                | Requirement                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `RSF-FILE-DS-001` | The reported file length shall be the physical length in bytes, including any leading metadata and any trailing incomplete element bytes.                                                                                                                                                                                                                                                                                                                                                                   |
+| `RSF-FILE-DS-002` | On construction, the logical element count shall be initialized to `floor((file_len - data_offset) / element_size)` when `file_len` is greater than `data_offset`, and zero otherwise. The current instance's count shall then be updated by its row mutations and shall not count reserved rows until they are appended or inserted. A newly constructed wrapper treats all complete rows implied by file length as logical rows; reserved capacity is not persisted.                                      |
+| `RSF-FILE-DS-003` | Bytes remaining after the last complete element shall be treated as invalid trailing data and shall not contribute to the element count or be returned as a row. Read/count operations shall leave these bytes unchanged.                                                                                                                                                                                                                                                                                   |
+| `RSF-FILE-DS-004` | Element size and data offset shall be interpreted as byte counts and shall not depend on the layout or size of a Rust type.                                                                                                                                                                                                                                                                                                                                                                                 |
+| `RSF-FILE-DS-005` | The first `data_offset` bytes shall be the complete raw metadata region. Metadata length is exactly `data_offset`; metadata updates set the new offset to the new metadata byte length.                                                                                                                                                                                                                                                                                                                     |
+| `RSF-FILE-DS-006` | Updating metadata shall preserve the byte sequence of the entire row region, including any trailing incomplete-row bytes, while shifting it by the metadata-length difference.                                                                                                                                                                                                                                                                                                                              |
+| `RSF-FILE-DS-007` | `truncate_rows(n)` shall retain rows `[0, n)`; `truncate_rows_front(n)` shall retain the last `n` rows, compacted to begin at `data_offset`. Both operations shall discard trailing incomplete-row bytes and shall leave the metadata bytes unchanged.                                                                                                                                                                                                                                                      |
+| `RSF-FILE-DS-008` | A row read or write shall address byte range `[data_offset + index * element_size, data_offset + (index + 1) * element_size)`. Reads shall require an existing complete row. Writes shall replace an existing complete row and shall not append, create sparse gaps, or change the data-region length; the metadata prefix may be padded as specified by `RSF-FILE-DS-015`.                                                                                                                                 |
+| `RSF-FILE-DS-009` | Full iteration shall visit complete rows in ascending index order from zero through the row count captured when the iterator is created. Range iteration shall visit rows `[start, start + count)` in ascending order, with the range validated against the row count at iterator creation.                                                                                                                                                                                                                 |
+| `RSF-FILE-DS-010` | Standard iterator items shall be `anyhow::Result<Vec<u8>>`; each successful item shall contain exactly one complete row. The iterator shall end after its captured row range and shall report row read failures as `Err` items.                                                                                                                                                                                                                                                                             |
+| `RSF-FILE-DS-011` | A block buffer shall contain a concatenation of complete rows in ascending file order. Its byte length shall be an exact multiple of `element_size`; the number of rows is the buffer length divided by `element_size`.                                                                                                                                                                                                                                                                                     |
+| `RSF-FILE-DS-012` | A block operation shall address rows `[start, start + block_row_count)`. It shall reject overflowing ranges before file mutation and out-of-bounds ranges without extending the data region. A non-empty block write shall first ensure the metadata prefix exists as specified by `RSF-FILE-DS-015`; an empty buffer shall be a no-op when `start` is at most the current row count.                                                                                                                       |
+| `RSF-FILE-DS-013` | `append_row` shall write exactly one complete row at the byte position immediately after the existing logical rows. It shall overwrite any incomplete trailing bytes. If the file has no reserved capacity for the new row, it shall extend the file to the row's end; otherwise it shall not change the file length.                                                                                                                                                                                       |
+| `RSF-FILE-DS-014` | `insert_row(index, row)` shall place the supplied row before the logical row at `index`, shift subsequent logical rows by one element width, and discard any incomplete trailing bytes. The valid index range is `0..=element_count`; inserting at `element_count` is equivalent to appending. It shall extend the file only when the new logical row count exceeds reserved capacity.                                                                                                                      |
+| `RSF-FILE-DS-015` | Before a non-empty row write, append, or insertion proceeds, if the physical file is shorter than `data_offset`, the operation shall extend it to `data_offset` with zero bytes without changing any existing file bytes.                                                                                                                                                                                                                                                                                   |
+| `RSF-FILE-DS-016` | When `new_count` exceeds the reserved capacity, `reserve_rows` shall extend the file length to `data_offset + new_count * element_size` using `File::set_len`; the newly extended bytes shall read as zero. It shall not change the current instance's logical row count. Existing bytes, including any incomplete trailing suffix, shall remain at their original offsets. Reserved capacity is instance-local: after reopening, all complete rows implied by the file length are treated as logical rows. |
 
 ### Rust-specific requirements
 
-| ID | Requirement |
-|---|---|
-| `RSF-FILE-RS-001` | The public wrapper shall be a concrete, non-generic type. |
-| `RSF-FILE-RS-002` | The wrapper shall own a concrete `std::fs::File`. Handle-based construction shall take `File` by value; path-based construction shall store the opened or created `File` directly. |
-| `RSF-FILE-RS-003` | The wrapper shall reject a zero element size at construction. |
-| `RSF-FILE-RS-004` | File metadata queries shall return observable errors when the operating system cannot retrieve file metadata; they shall not substitute a length of zero. |
-| `RSF-FILE-RS-005` | The wrapper shall not claim to synchronize concurrent file access or protect the file with a mutex or other locking mechanism. |
+| ID                | Requirement                                                                                                                                                                                                                 |
+| ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `RSF-FILE-RS-001` | The public wrapper shall be a concrete, non-generic type.                                                                                                                                                                   |
+| `RSF-FILE-RS-002` | The wrapper shall own a concrete `std::fs::File`. Handle-based construction shall take `File` by value; path-based construction shall store the opened or created `File` directly.                                          |
+| `RSF-FILE-RS-003` | The wrapper shall reject a zero element size at construction.                                                                                                                                                               |
+| `RSF-FILE-RS-004` | File metadata queries shall return observable errors when the operating system cannot retrieve file metadata; they shall not substitute a length of zero.                                                                   |
+| `RSF-FILE-RS-005` | The wrapper shall not claim to synchronize concurrent file access or protect the file with a mutex or other locking mechanism.                                                                                              |
 | `RSF-FILE-RS-006` | `get_raw_metadata` and `read_row` shall fill caller-provided mutable slices and shall not allocate an output `Vec<u8>`. The buffer length shall exactly match the metadata length or configured element size, respectively. |
-| `RSF-FILE-RS-007` | Row read/write methods shall perform direct, unbuffered row operations and shall not add a row buffer to the wrapper. |
-| `RSF-FILE-RS-008` | Row write input shall be validated to have exactly `element_size` bytes; invalid row sizes and out-of-range row indices shall return errors. |
-| `RSF-FILE-RS-009` | Both row truncation methods shall reject a requested retained row count greater than the current complete row count and shall not extend or pad the file. |
-| `RSF-FILE-RS-010` | The wrapper shall store `data_offset` as a plain `u64` and shall not implement `Clone` or internally synchronize access. |
-| `RSF-FILE-RS-011` | The `file`, `element_size`, and `data_offset` fields shall remain private. The file handle shall not be exposed; element size and offset shall be observable only through immutable getters. |
-| `RSF-FILE-RS-012` | The allocation-avoiding row iteration API shall use a custom buffer-filling iterator; each step shall fill an exact-size caller-provided buffer and shall not allocate an output row. |
-| `RSF-FILE-RS-013` | The conventional row iterator shall implement `std::iter::Iterator<Item = anyhow::Result<Vec<u8>>>`; allocation of an owned row value per successful item is accepted for this API. |
-| `RSF-FILE-RS-014` | `read_rows` and `write_rows` shall use caller-provided byte slices, validate that the byte length contains only whole rows, and shall not allocate an output buffer. |
-| `RSF-FILE-RS-015` | `append_row` and `insert_row` shall accept a caller-provided slice of exactly `element_size` bytes; insertion shall not require the caller to provide or clone the rows being shifted. |
-| `RSF-FILE-RS-016` | Row writes shall remain replacement-only for complete existing rows; after ensuring the metadata prefix exists, they shall reject out-of-range row ranges rather than creating or padding data rows. |
-| `RSF-FILE-RS-017` | `reserve_rows` shall use an operating-system-supported physical storage reservation mechanism and shall return an error if the requested reservation cannot be completed or is unsupported. |
+| `RSF-FILE-RS-007` | Row read/write methods shall perform direct, unbuffered row operations and shall not add a row buffer to the wrapper.                                                                                                       |
+| `RSF-FILE-RS-008` | Row write input shall be validated to have exactly `element_size` bytes; invalid row sizes and out-of-range row indices shall return errors.                                                                                |
+| `RSF-FILE-RS-009` | Both row truncation methods shall reject a requested retained row count greater than the current logical row count and shall not extend or pad the file.                                                                    |
+| `RSF-FILE-RS-010` | The wrapper shall store `data_offset` as a plain `u64` and shall not implement `Clone` or internally synchronize access.                                                                                                    |
+| `RSF-FILE-RS-011` | The file handle, layout fields, logical row count, and reserved capacity shall remain private. The file handle shall not be exposed; element size and offset shall be observable only through immutable getters.            |
+| `RSF-FILE-RS-012` | The allocation-avoiding row iteration API shall use a custom buffer-filling iterator; each step shall fill an exact-size caller-provided buffer and shall not allocate an output row.                                       |
+| `RSF-FILE-RS-013` | The conventional row iterator shall implement `std::iter::Iterator<Item = anyhow::Result<Vec<u8>>>`; allocation of an owned row value per successful item is accepted for this API.                                         |
+| `RSF-FILE-RS-014` | `read_rows` and `write_rows` shall use caller-provided byte slices, validate that the byte length contains only whole rows, and shall not allocate an output buffer.                                                        |
+| `RSF-FILE-RS-015` | `append_row` and `insert_row` shall accept a caller-provided slice of exactly `element_size` bytes; insertion shall not require the caller to provide or clone the rows being shifted.                                      |
+| `RSF-FILE-RS-016` | Row writes shall remain replacement-only for complete existing rows; after ensuring the metadata prefix exists, they shall reject out-of-range row ranges rather than creating or padding data rows.                        |
+| `RSF-FILE-RS-017` | `reserve_rows` shall use `File::set_len` to extend file length and shall not claim to guarantee physical disk-block allocation.                                                                                             |
 
 ## Public API
 
@@ -334,36 +335,31 @@ impl Iterator for FileRows<'_> {
   the inserted bytes shall occupy the resulting gap. Incomplete trailing
   bytes shall be ignored and discarded; only complete rows are shifted and
   preserved.
-- After append or insertion, the physical file shall end at
-  `data_offset + (element_count_before + 1) * element_size`, where
-  `element_count_before` excludes any incomplete trailing bytes. Insertion at
-  the current row count shall have the same resulting layout as append. These
-  operations shall preserve the metadata prefix and shall not reinterpret row
-  contents.
+- Append and insertion shall update the current instance's logical row count.
+  If reserved capacity is available, they shall leave the physical file length
+  unchanged; otherwise, they shall extend it only as far as required for the
+  new row. Insertion at the current row count shall have the same resulting
+  logical layout as append. These operations shall preserve the metadata
+  prefix and shall not reinterpret row contents.
 - Before a non-empty `write_row`, `write_rows`, `append_row`, or `insert_row`
   operation accesses row data, it shall extend a file shorter than
   `data_offset` with zero bytes up to that offset. Existing bytes shall not be
   overwritten. Row writes remain replacement-only: after prefix padding,
   writes to rows that do not exist shall return an out-of-range error rather
   than create rows. An empty block write is a no-op and shall not pad.
-- `reserve_rows(new_count)` shall query the current complete row count. If
-  `new_count` is less than or equal to that count, it shall return success
-  without modifying the file or invoking physical allocation.
-- If `new_count` is greater than the current count, `reserve_rows` shall
-  zero-pad a missing metadata prefix, preserve every existing byte at its
-  current offset (including an incomplete trailing suffix), and ensure
-  physical storage for a file length of exactly
+- `reserve_rows(new_count)` shall compare the requested capacity with the
+  current reserved capacity. If `new_count` is less than or equal to that
+  capacity, it shall return success without modifying the file.
+- If `new_count` exceeds current capacity, `reserve_rows` shall zero-pad a
+  missing metadata prefix, preserve every existing byte at its current offset
+  (including an incomplete trailing suffix), and set the file length to
   `data_offset + new_count * element_size`. Newly extended bytes shall read
-  as zero. Existing partial suffix bytes keep their offsets and are not moved
-  or discarded; if they fall within the newly counted row range, they become
-  bytes of that row.
+  as zero. This changes capacity only, not the current instance's logical row
+  count.
 - `reserve_rows` shall check multiplication and addition for overflow before
-  modifying the file. It shall use a platform-supported mechanism that
-  physically reserves storage for the requested file length, rather than
-  relying solely on sparse logical extension. Platforms or filesystems that
-  cannot provide this guarantee shall return an error. Success means the
-  complete requested storage reservation and logical file length have been
-  established.
+  modifying the file. It reserves file length only; it does not promise that
+  the operating system has physically allocated disk blocks. This avoids
+  repeated file-length growth during later appends within the reserved range.
 - Input-shape and arithmetic-overflow validation shall happen before
   modifying the file. Once a valid non-empty write operation needs to
   normalize a missing metadata prefix, that zero-padding may remain even if
@@ -440,7 +436,7 @@ impl Iterator for FileRows<'_> {
   may have modified part of the file; neither operation promises atomicity.
 - `append_row` and `insert_row` shall reject a row buffer whose length differs
   from `element_size`. `insert_row` shall reject an index greater than the
-  current complete-row count after ensuring the metadata prefix exists.
+  current logical row count after ensuring the metadata prefix exists.
 - Row writes, append, and insertion shall zero-fill a missing metadata
   prefix. Replacement writes shall still reject absent rows and shall not
   extend or pad the row region. Invalid input lengths shall fail before
@@ -449,11 +445,10 @@ impl Iterator for FileRows<'_> {
   shall be reported. If an I/O error occurs after mutation begins, the file
   may contain a partially completed operation; success shall not be reported.
 - `reserve_rows` shall return an error for size arithmetic overflow, failure
-  to create a missing metadata prefix, unsupported physical reservation, or
-  operating-system/storage errors. A failed reservation shall not be
-  reported as success; partial file-length or allocation changes may remain
+  to create a missing metadata prefix, or operating-system errors. A failed
+  reservation shall not be reported as success; partial file-length changes may remain
   if the platform reports failure after making changes.
-- Row count parameters greater than the current complete-row count shall
+- Row count parameters greater than the current logical row count shall
   return an error for either truncation operation.
 - A range whose start/count overflows or extends beyond the complete row
   count shall be rejected when creating the range iterator.
@@ -501,11 +496,10 @@ impl Iterator for FileRows<'_> {
 - Appending and inserting preserve opaque row bytes; insertion shifts
   subsequent complete rows rather than decoding or rebuilding records.
   Incomplete trailing bytes are ignored and discarded by append/insertion.
-- Row reservation preserves the byte positions of existing data and partial
-  suffix bytes; newly extended bytes read as zero and reserved storage is
-  physically allocated by a supported operating-system mechanism.
-- `reserve_rows` is a no-op, including no storage-allocation attempt, when the
-  requested row count is already satisfied.
+- Row reservation extends file length with `set_len`, preserves the byte
+  positions of existing data and partial suffix bytes, and leaves logical row
+  count unchanged for the current instance. Newly extended bytes read as zero.
+- `reserve_rows` is a no-op when the requested capacity is already satisfied.
 - No element encoding format or cross-platform record layout is defined here.
 
 ## Performance and resource use
@@ -523,9 +517,10 @@ impl Iterator for FileRows<'_> {
 - Appending writes one row; insertion may require moving the remaining file
   region and shall use bounded temporary storage rather than buffering the
   entire region.
-- `reserve_rows` may allocate disk space proportional to the requested file
-  size. It is not required to avoid physical disk allocation or promise
-  transactional rollback if the operating system reports a failure.
+- `reserve_rows` extends logical file length but does not guarantee physical
+  disk allocation; filesystems may represent the extension sparsely. Appends
+  within the reserved length avoid extending the file. The operation does not
+  promise transactional rollback if the operating system reports a failure.
 - The row iterator shall reuse only the caller's buffer and shall not allocate
   per-row output storage. Its captured end bound prevents later file growth
   from extending an in-progress iteration.
@@ -540,17 +535,17 @@ impl Iterator for FileRows<'_> {
 
 ### Phase planning and reflection
 
-| Phase ID | Phase and implementation steps | Dependencies | Completion criteria |
-|---|---|---|---|
-| P-001 | Confirm public naming, owned-file behavior, path open-or-create behavior, metadata layout/resize semantics, row truncation, single-row, block, append, insert, reserve operations, both iterator behaviors, and error semantics against this requirement and legacy `FileReference`. | None. | The API is non-generic, takes ownership of `File`, stores the offset as `u64`, preserves existing files and row bytes on metadata resize/reservation, and defines row bounds, block sizes/ranges, append/insert layout, reservation behavior, truncation, and iterator semantics. |
-| P-002 | Implement `FileMetadata` with owned-file and path-based constructors, metadata access/update, row truncation, direct single-row and block I/O, append/insert/reserve, buffer-filling iterators, and conventional `Iterator` implementations for full/ranged rows. | P-001. | The API satisfies ownership and byte-layout requirements, creates missing files, preserves existing data, physically reserves requested row storage, and all row operations and iterator interfaces follow their specified allocation and error behavior. |
-| P-003 | Add tests for both constructors, metadata access and resizing, row truncation from both ends, single-row and block I/O, append/insert/reserve, full/ranged buffer-filling and standard iteration, file length/count, boundaries, caller-managed handles, and operating-system errors; run applicable checks. | P-002. | All specified behaviors and failure cases are tested and the relevant project checks pass. |
+| Phase ID | Phase and implementation steps                                                                                                                                                                                                                                                                                                                       | Dependencies | Completion criteria                                                                                                                                                                                                                                                                                      |
+| -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| P-001    | Confirm public naming, owned-file behavior, path open-or-create behavior, metadata layout/resize semantics, row truncation, single-row, block, append, insert, reserve operations, both iterator behaviors, and error semantics against this requirement and legacy `FileReference`.                                                                 | None.        | The API is non-generic, takes ownership of `File`, stores the offset as `u64`, preserves existing files and row bytes on metadata resize/reservation, and defines row bounds, block sizes/ranges, append/insert layout, reservation behavior, truncation, and iterator semantics.                        |
+| P-002    | Implement `FileMetadata` with owned-file and path-based constructors, metadata access/update, row truncation, direct single-row and block I/O, append/insert/reserve, buffer-filling iterators, and conventional `Iterator` implementations for full/ranged rows.                                                                                    | P-001.       | The API satisfies ownership and byte-layout requirements, creates missing files, preserves existing data, extends file length for reserved capacity without changing the current logical row count, and all row operations and iterator interfaces follow their specified allocation and error behavior. |
+| P-003    | Add tests for both constructors, metadata access and resizing, row truncation from both ends, single-row and block I/O, append/insert/reserve, full/ranged buffer-filling and standard iteration, file length/count, boundaries, caller-managed handles, and operating-system errors where a deterministic test is available; run applicable checks. | P-002.       | All specified behaviors and deterministically testable failure cases are tested, and the relevant project checks pass.                                                                                                                                                                                   |
 
 ### Current implementation checklist
 
-- [ ] P-001 — `Confirm file metadata API contract` — Not started
-- [ ] P-002 — `Implement owned-file metadata wrapper` — Not started
-- [ ] P-003 — `Test and validate file metadata wrapper` — Not started
+- [x] P-001 — `Confirm file metadata API contract` — Complete
+- [x] P-002 — `Implement owned-file metadata wrapper` — Complete
+- [x] P-003 — `Test and validate file metadata wrapper` — Complete
 
 **Planning reflection (complete before implementation):**
 
@@ -585,11 +580,11 @@ impl Iterator for FileRows<'_> {
   prefix to `data_offset`. Indexed writes remain replacement-only and fail if
   the target rows do not exist; prefix padding may remain after such a range
   error.
-- `reserve_rows` is monotonic: requests at or below the current complete row
-  count are strict no-ops. Growth zero-pads a missing metadata prefix, keeps
-  all existing bytes at their current offsets, exposes zero-filled extension
-  bytes, and must physically reserve the target file size. An incomplete
-  suffix is retained in place and may become part of a newly counted row.
+- `reserve_rows` is monotonic: requests at or below current capacity are
+  strict no-ops. Growth zero-pads a missing metadata prefix, keeps all existing
+  bytes at their current offsets, exposes zero-filled extension bytes, and
+  leaves this instance's logical row count unchanged. Reopening derives the
+  row count from file length, so reserved rows then appear as rows.
 - Iteration covers either all complete rows or a validated range. Its custom
   `next_into` method uses the caller's reusable buffer to avoid allocating a
   row for each step.
@@ -600,46 +595,61 @@ impl Iterator for FileRows<'_> {
 
 **Implementation reflection (update as work progresses):**
 
-- Implementation has not started. Update this reflection, phase checklist,
-  tests, and coverage results as work is completed.
+- Implemented `FileMetadata` in `src/file/file_metadata.rs` and exported it
+  from the already-public `file` module. Metadata movement and row insertion
+  use bounded 64 KiB copying in the safe overlap direction.
+- Row reservation extends file length with `set_len`; this grows its logical
+  length but does not guarantee physical disk allocation. Appends and
+  insertions within the resulting capacity do not extend the file.
+- Added 29 executable integration tests covering the specified constructors,
+  metadata operations, row operations, iterators, failure handling, and
+  reservation behavior. The metadata-query OS-error case remains not run
+  because there is no deterministic portable way to make `metadata()` fail
+  on an open regular file.
+- `cargo test --manifest-path rust_serial_file\\Cargo.toml` passed all unit,
+  integration, and doc tests; Clippy with warnings denied and `cargo fmt
+--check` passed.
+- Coverage has not been measured. No coverage tool was run.
 
 ## Testing and acceptance criteria
 
 ### Tests
 
-The following tests are planned and have not yet been run.
+Use **⏳ Not run** until a test has been executed, then set its status to
+**✅ Success** or **❌ Failed**.
 
-| Test ID | Requirement IDs | Description of the test | Success requirements | Test file | Test name | Status |
-|---|---|---|---|---|---|---|
-| T-001 | `RSF-FILE-FR-005`, `RSF-FILE-FR-006`, `RSF-FILE-RS-001`, `RSF-FILE-RS-002` | Construct the wrapper by moving an owned `File` into the non-generic type. | Construction accepts `File` by value and the wrapper can query the file afterward. | `rust_serial_file/tests/file_metadata.rs` | `constructs_from_owned_file` | ⏳ Not run |
-| T-002 | `RSF-FILE-FR-001`, `RSF-FILE-DS-001` | Query the physical length of a file containing bytes. | The reported length equals the file's byte length. | `rust_serial_file/tests/file_metadata.rs` | `reports_physical_file_length` | ⏳ Not run |
-| T-003 | `RSF-FILE-FR-002`, `RSF-FILE-FR-003`, `RSF-FILE-DS-002` | Count fixed-size elements in a file with no leading offset and an exact multiple of the element size. | The count equals the number of complete elements. | `rust_serial_file/tests/file_metadata.rs` | `counts_fixed_size_elements` | ⏳ Not run |
-| T-004 | `RSF-FILE-FR-004`, `RSF-FILE-FR-003`, `RSF-FILE-DS-002` | Count elements after an offset reserved for in-file metadata. | Bytes before the offset do not contribute to the element count. | `rust_serial_file/tests/file_metadata.rs` | `excludes_leading_metadata_from_element_count` | ⏳ Not run |
-| T-005 | `RSF-FILE-DS-002`, `RSF-FILE-DS-003` | Query the count when the file is shorter than the offset or has a trailing partial element. | A short data region yields zero; trailing incomplete bytes are ignored without underflow. | `rust_serial_file/tests/file_metadata.rs` | `handles_offset_beyond_end_and_partial_elements` | ⏳ Not run |
-| T-006 | `RSF-FILE-RS-003` | Attempt to construct the wrapper with a zero element size. | Construction returns an error. | `rust_serial_file/tests/file_metadata.rs` | `rejects_zero_element_size` | ⏳ Not run |
-| T-007 | `RSF-FILE-FR-007`, `RSF-FILE-FR-008` | Observe a file-length change made through an additional handle created and retained by the caller. | The wrapper itself is not cloned; a fresh query sees the updated physical length. | `rust_serial_file/tests/file_metadata.rs` | `observes_length_changes_from_caller_managed_handle` | ⏳ Not run |
-| T-008 | `RSF-FILE-RS-004` | Query metadata for a file handle whose metadata operation fails, where the platform permits a deterministic test setup. | The query returns an observable error instead of a zero length or count. | `rust_serial_file/tests/file_metadata.rs` | `propagates_file_metadata_errors` | ⏳ Not run |
-| T-009 | `RSF-FILE-FR-009`, `RSF-FILE-RS-002` | Open the wrapper from a path that does not yet exist. | The file is created, owned by the wrapper, and initially reports a length of zero. | `rust_serial_file/tests/file_metadata.rs` | `creates_missing_file_from_path` | ⏳ Not run |
-| T-010 | `RSF-FILE-FR-009` | Open the wrapper from a path containing an existing file. | Existing bytes are preserved and remain included in the reported physical length. | `rust_serial_file/tests/file_metadata.rs` | `opens_existing_file_without_truncating` | ⏳ Not run |
-| T-011 | `RSF-FILE-FR-010`, `RSF-FILE-RS-006` | Read raw metadata into a caller-provided buffer. | An exact-size buffer is filled with the prefix bytes without an output allocation; buffers of the wrong size and files shorter than the prefix return errors. | `rust_serial_file/tests/file_metadata.rs` | `loads_exact_raw_metadata` | ⏳ Not run |
-| T-012 | `RSF-FILE-FR-011`, `RSF-FILE-DS-005`, `RSF-FILE-DS-006` | Replace metadata with same-size, smaller, and larger byte sequences. | Metadata bytes update correctly; all following row bytes, including any trailing partial row, remain identical and are shifted as needed; length and local offset update correctly. | `rust_serial_file/tests/file_metadata.rs` | `updates_metadata_without_losing_rows` | ⏳ Not run |
-| T-013 | `RSF-FILE-FR-012`, `RSF-FILE-DS-007`, `RSF-FILE-RS-009` | Truncate rows from the back to retain a selected row count, including zero and an invalid count. | The first requested rows remain, metadata is unchanged, partial trailing bytes are removed, zero removes all rows, and a count above the current count returns an error. | `rust_serial_file/tests/file_metadata.rs` | `truncates_rows_from_back` | ⏳ Not run |
-| T-014 | `RSF-FILE-FR-013`, `RSF-FILE-DS-007`, `RSF-FILE-RS-009` | Truncate rows from the front to retain a selected row count. | The last requested rows remain in order beginning immediately after metadata; metadata is unchanged and invalid counts return an error. | `rust_serial_file/tests/file_metadata.rs` | `truncates_rows_from_front` | ⏳ Not run |
-| T-015 | `RSF-FILE-FR-014`, `RSF-FILE-DS-008`, `RSF-FILE-FR-022`, `RSF-FILE-DS-015`, `RSF-FILE-RS-006`, `RSF-FILE-RS-007`, `RSF-FILE-RS-008` | Read rows into and write rows from caller-provided exact-size byte slices. | Reads fill the caller buffer without an output allocation; writes replace existing rows without changing the data-region length; valid-width non-empty writes first zero-pad a missing metadata prefix; wrong-size buffers return errors without mutation. | `rust_serial_file/tests/file_metadata.rs` | `reads_and_writes_rows_without_buffering` | ⏳ Not run |
-| T-016 | `RSF-FILE-FR-015`, `RSF-FILE-RS-011` | Read the configured element size and data offset, then update metadata size and read the offset again. | Getters return the configured values, reflect a successful metadata resize, and do not permit mutation or access to the file handle. | `rust_serial_file/tests/file_metadata.rs` | `exposes_read_only_layout_metadata` | ⏳ Not run |
-| T-017 | `RSF-FILE-FR-016`, `RSF-FILE-DS-009`, `RSF-FILE-RS-012` | Iterate all rows using one reusable caller-provided buffer. | Complete rows are copied into the buffer in ascending order, iteration stops at its initial row-count bound, and no row output vector is allocated. | `rust_serial_file/tests/file_metadata.rs` | `iterates_all_rows_into_reusable_buffer` | ⏳ Not run |
-| T-018 | `RSF-FILE-FR-016`, `RSF-FILE-DS-009`, `RSF-FILE-RS-012` | Iterate a selected row range, including an empty range, and request invalid ranges. | Exactly the requested rows are copied into the buffer in order; an empty range is immediately exhausted; overflow or out-of-bounds ranges return errors at creation. | `rust_serial_file/tests/file_metadata.rs` | `iterates_selected_row_range` | ⏳ Not run |
-| T-019 | `RSF-FILE-FR-016`, `RSF-FILE-RS-012` | Call `next_into` with an incorrectly sized buffer while rows remain and after exhaustion. | A wrong-sized active buffer returns an error without advancing; after exhaustion `next_into` returns `Ok(false)` and leaves the buffer unchanged. | `rust_serial_file/tests/file_metadata.rs` | `validates_row_iterator_buffer_size` | ⏳ Not run |
-| T-020 | `RSF-FILE-FR-017`, `RSF-FILE-DS-009`, `RSF-FILE-DS-010`, `RSF-FILE-RS-013` | Use the standard full-row iterator with a `for` loop and iterator adaptors. | It yields `Ok` owned byte vectors in ascending order, each exactly one row long, and stops at the row-count snapshot taken when created. | `rust_serial_file/tests/file_metadata.rs` | `standard_iterator_yields_all_rows` | ⏳ Not run |
-| T-021 | `RSF-FILE-FR-017`, `RSF-FILE-DS-009`, `RSF-FILE-DS-010`, `RSF-FILE-RS-013` | Use the standard range iterator for a valid range and an empty range, and request a range outside the file. | It yields exactly the requested owned rows in ascending order; an empty range yields no items; invalid ranges are rejected when creating the iterator. | `rust_serial_file/tests/file_metadata.rs` | `standard_iterator_yields_selected_range` | ⏳ Not run |
-| T-022 | `RSF-FILE-FR-017`, `RSF-FILE-DS-010` | Cause a row read failure during standard iteration, then call `next` again. | The failing row yields `Some(Err(_))`, and the iterator returns `None` thereafter. | `rust_serial_file/tests/file_metadata.rs` | `standard_iterator_stops_after_read_error` | ⏳ Not run |
-| T-023 | `RSF-FILE-FR-018`, `RSF-FILE-DS-011`, `RSF-FILE-DS-012`, `RSF-FILE-RS-014` | Read multiple contiguous rows into a caller-provided buffer, including an empty block, and try a partial-row buffer and an out-of-range block. | Complete rows are copied in ascending order without output allocation; valid empty blocks succeed; invalid sizes and ranges return errors without partial-range reads. | `rust_serial_file/tests/file_metadata.rs` | `reads_contiguous_row_blocks` | ⏳ Not run |
-| T-024 | `RSF-FILE-FR-019`, `RSF-FILE-DS-011`, `RSF-FILE-DS-012`, `RSF-FILE-RS-014` | Write multiple contiguous rows from a caller-provided buffer, including an empty block, and try a partial-row buffer and an out-of-range block. | Existing rows are replaced in order without changing the data-region length; valid empty blocks succeed without padding; invalid ranges do not extend the data region. A short metadata prefix may be padded before an out-of-range error. | `rust_serial_file/tests/file_metadata.rs` | `writes_contiguous_row_blocks` | ⏳ Not run |
-| T-025 | `RSF-FILE-FR-020`, `RSF-FILE-FR-022`, `RSF-FILE-DS-013`, `RSF-FILE-DS-015`, `RSF-FILE-RS-015` | Append one row to empty and non-empty data regions, including a file with trailing incomplete-row bytes and one shorter than `data_offset`; reject an incorrect row size. | The row overwrites the incomplete suffix, the file ends immediately after the new complete row, missing metadata is zero-padded, and invalid input length causes no mutation. | `rust_serial_file/tests/file_metadata.rs` | `appends_rows_and_discards_partial_suffix` | ⏳ Not run |
-| T-026 | `RSF-FILE-FR-021`, `RSF-FILE-FR-022`, `RSF-FILE-DS-014`, `RSF-FILE-DS-015`, `RSF-FILE-RS-015` | Insert rows at the beginning, middle, and end with a trailing incomplete suffix or a file shorter than `data_offset`; reject an invalid index and row size. | Inserted rows occupy the requested index, later complete rows remain byte-for-byte ordered, incomplete trailing bytes are discarded, and the missing prefix is zero-padded. | `rust_serial_file/tests/file_metadata.rs` | `inserts_rows_and_discards_partial_suffix` | ⏳ Not run |
-| T-027 | `RSF-FILE-FR-014`, `RSF-FILE-FR-018`, `RSF-FILE-FR-019`, `RSF-FILE-FR-022`, `RSF-FILE-DS-015`, `RSF-FILE-RS-016` | Attempt non-empty row and block replacements on a file shorter than `data_offset`, then write to valid existing rows and invalid missing rows. | Missing metadata is zero-padded before row-range validation; replacement writes succeed only for existing complete rows and never create or pad data rows. | `rust_serial_file/tests/file_metadata.rs` | `pads_metadata_before_replacement_write_validation` | ⏳ Not run |
-| T-028 | `RSF-FILE-FR-023`, `RSF-FILE-DS-016`, `RSF-FILE-RS-017` | Reserve zero, the current row count, and a larger row count, including a file with a short metadata prefix and a partial trailing suffix. | Requests at or below the current row count do not change file length or contents or attempt allocation; growth zero-pads missing metadata, preserves existing bytes at their offsets, exposes zero-filled extension bytes, sets length to the target, and physically reserves the requested storage. | `rust_serial_file/tests/file_metadata.rs` | `reserves_rows_and_preserves_existing_offsets` | ⏳ Not run |
-| T-029 | `RSF-FILE-FR-023`, `RSF-FILE-RS-017` | Request a row count whose target file size overflows and test unsupported or failed physical reservation where deterministic. | Overflow and reservation failures are returned; no success-shaped result is reported. | `rust_serial_file/tests/file_metadata.rs` | `reports_row_reservation_failures` | ⏳ Not run |
+| Test ID | Requirement IDs                                                                                                                     | Description of the test                                                                                                                                                     | Success requirements                                                                                                                                                                                                                                              | Test file                                 | Test name                                            | Status     |
+| ------- | ----------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------- | ---------------------------------------------------- | ---------- |
+| T-001   | `RSF-FILE-FR-005`, `RSF-FILE-FR-006`, `RSF-FILE-RS-001`, `RSF-FILE-RS-002`                                                          | Construct the wrapper by moving an owned `File` into the non-generic type.                                                                                                  | Construction accepts `File` by value and the wrapper can query the file afterward.                                                                                                                                                                                | `rust_serial_file/tests/file_metadata.rs` | `constructs_from_owned_file`                         | ✅ Success |
+| T-002   | `RSF-FILE-FR-001`, `RSF-FILE-DS-001`                                                                                                | Query the physical length of a file containing bytes.                                                                                                                       | The reported length equals the file's byte length.                                                                                                                                                                                                                | `rust_serial_file/tests/file_metadata.rs` | `reports_physical_file_length`                       | ✅ Success |
+| T-003   | `RSF-FILE-FR-002`, `RSF-FILE-FR-003`, `RSF-FILE-DS-002`                                                                             | Count fixed-size elements in a file with no leading offset and an exact multiple of the element size.                                                                       | The count equals the number of complete elements.                                                                                                                                                                                                                 | `rust_serial_file/tests/file_metadata.rs` | `counts_fixed_size_elements`                         | ✅ Success |
+| T-004   | `RSF-FILE-FR-004`, `RSF-FILE-FR-003`, `RSF-FILE-DS-002`                                                                             | Count elements after an offset reserved for in-file metadata.                                                                                                               | Bytes before the offset do not contribute to the element count.                                                                                                                                                                                                   | `rust_serial_file/tests/file_metadata.rs` | `excludes_leading_metadata_from_element_count`       | ✅ Success |
+| T-005   | `RSF-FILE-DS-002`, `RSF-FILE-DS-003`                                                                                                | Query the count when the file is shorter than the offset or has a trailing partial element.                                                                                 | A short data region yields zero; trailing incomplete bytes are ignored without underflow.                                                                                                                                                                         | `rust_serial_file/tests/file_metadata.rs` | `handles_offset_beyond_end_and_partial_elements`     | ✅ Success |
+| T-006   | `RSF-FILE-RS-003`                                                                                                                   | Attempt to construct the wrapper with a zero element size.                                                                                                                  | Construction returns an error.                                                                                                                                                                                                                                    | `rust_serial_file/tests/file_metadata.rs` | `rejects_zero_element_size`                          | ✅ Success |
+| T-007   | `RSF-FILE-FR-007`, `RSF-FILE-FR-008`                                                                                                | Observe a file-length change made through an additional handle created and retained by the caller.                                                                          | The wrapper itself is not cloned; a fresh query sees the updated physical length.                                                                                                                                                                                 | `rust_serial_file/tests/file_metadata.rs` | `observes_length_changes_from_caller_managed_handle` | ✅ Success |
+| T-008   | `RSF-FILE-RS-004`                                                                                                                   | Query metadata for a file handle whose metadata operation fails, where the platform permits a deterministic setup. No portable setup is available for an open regular file. | If the platform provides a deterministic setup, the query returns the operating-system error instead of a zero length or count.                                                                                                                                   | —                                         | —                                                    | ⏳ Not run |
+| T-009   | `RSF-FILE-FR-009`, `RSF-FILE-RS-002`                                                                                                | Open the wrapper from a path that does not yet exist.                                                                                                                       | The file is created, owned by the wrapper, and initially reports a length of zero.                                                                                                                                                                                | `rust_serial_file/tests/file_metadata.rs` | `creates_missing_file_from_path`                     | ✅ Success |
+| T-010   | `RSF-FILE-FR-009`                                                                                                                   | Open the wrapper from a path containing an existing file.                                                                                                                   | Existing bytes are preserved and remain included in the reported physical length.                                                                                                                                                                                 | `rust_serial_file/tests/file_metadata.rs` | `opens_existing_file_without_truncating`             | ✅ Success |
+| T-011   | `RSF-FILE-FR-010`, `RSF-FILE-RS-006`                                                                                                | Read raw metadata into a caller-provided buffer.                                                                                                                            | An exact-size buffer is filled with the prefix bytes without an output allocation; buffers of the wrong size and files shorter than the prefix return errors.                                                                                                     | `rust_serial_file/tests/file_metadata.rs` | `loads_exact_raw_metadata`                           | ✅ Success |
+| T-012   | `RSF-FILE-FR-011`, `RSF-FILE-DS-005`, `RSF-FILE-DS-006`                                                                             | Replace metadata with same-size, smaller, and larger byte sequences.                                                                                                        | Metadata bytes update correctly; all following row bytes, including any trailing partial row, remain identical and are shifted as needed; length and local offset update correctly.                                                                               | `rust_serial_file/tests/file_metadata.rs` | `updates_metadata_without_losing_rows`               | ✅ Success |
+| T-013   | `RSF-FILE-FR-012`, `RSF-FILE-DS-007`, `RSF-FILE-RS-009`                                                                             | Truncate rows from the back to retain a selected row count, including zero and an invalid count.                                                                            | The first requested rows remain, metadata is unchanged, partial trailing bytes are removed, zero removes all rows, and a count above the current count returns an error.                                                                                          | `rust_serial_file/tests/file_metadata.rs` | `truncates_rows_from_back`                           | ✅ Success |
+| T-014   | `RSF-FILE-FR-013`, `RSF-FILE-DS-007`, `RSF-FILE-RS-009`                                                                             | Truncate rows from the front to retain a selected row count.                                                                                                                | The last requested rows remain in order beginning immediately after metadata; metadata is unchanged and invalid counts return an error.                                                                                                                           | `rust_serial_file/tests/file_metadata.rs` | `truncates_rows_from_front`                          | ✅ Success |
+| T-015   | `RSF-FILE-FR-014`, `RSF-FILE-DS-008`, `RSF-FILE-FR-022`, `RSF-FILE-DS-015`, `RSF-FILE-RS-006`, `RSF-FILE-RS-007`, `RSF-FILE-RS-008` | Read rows into and write rows from caller-provided exact-size byte slices.                                                                                                  | Reads fill the caller buffer without an output allocation; writes replace existing rows without changing the data-region length; valid-width non-empty writes first zero-pad a missing metadata prefix; wrong-size buffers return errors without mutation.        | `rust_serial_file/tests/file_metadata.rs` | `reads_and_writes_rows_without_buffering`            | ✅ Success |
+| T-016   | `RSF-FILE-FR-015`, `RSF-FILE-RS-011`                                                                                                | Read the configured element size and data offset, then update metadata size and read the offset again.                                                                      | Getters return the configured values, reflect a successful metadata resize, and do not permit mutation or access to the file handle.                                                                                                                              | `rust_serial_file/tests/file_metadata.rs` | `exposes_read_only_layout_metadata`                  | ✅ Success |
+| T-017   | `RSF-FILE-FR-016`, `RSF-FILE-DS-009`, `RSF-FILE-RS-012`                                                                             | Iterate all rows using one reusable caller-provided buffer.                                                                                                                 | Complete rows are copied into the buffer in ascending order, iteration stops at its initial row-count bound, and no row output vector is allocated.                                                                                                               | `rust_serial_file/tests/file_metadata.rs` | `iterates_all_rows_into_reusable_buffer`             | ✅ Success |
+| T-018   | `RSF-FILE-FR-016`, `RSF-FILE-DS-009`, `RSF-FILE-RS-012`                                                                             | Iterate a selected row range, including an empty range, and request invalid ranges.                                                                                         | Exactly the requested rows are copied into the buffer in order; an empty range is immediately exhausted; overflow or out-of-bounds ranges return errors at creation.                                                                                              | `rust_serial_file/tests/file_metadata.rs` | `iterates_selected_row_range`                        | ✅ Success |
+| T-019   | `RSF-FILE-FR-016`, `RSF-FILE-RS-012`                                                                                                | Call `next_into` with an incorrectly sized buffer while rows remain and after exhaustion.                                                                                   | A wrong-sized active buffer returns an error without advancing; after exhaustion `next_into` returns `Ok(false)` and leaves the buffer unchanged.                                                                                                                 | `rust_serial_file/tests/file_metadata.rs` | `validates_row_iterator_buffer_size`                 | ✅ Success |
+| T-020   | `RSF-FILE-FR-017`, `RSF-FILE-DS-009`, `RSF-FILE-DS-010`, `RSF-FILE-RS-013`                                                          | Use the standard full-row iterator with a `for` loop and iterator adaptors.                                                                                                 | It yields `Ok` owned byte vectors in ascending order, each exactly one row long, and stops at the row-count snapshot taken when created.                                                                                                                          | `rust_serial_file/tests/file_metadata.rs` | `standard_iterator_yields_all_rows`                  | ✅ Success |
+| T-021   | `RSF-FILE-FR-017`, `RSF-FILE-DS-009`, `RSF-FILE-DS-010`, `RSF-FILE-RS-013`                                                          | Use the standard range iterator for a valid range and an empty range, and request a range outside the file.                                                                 | It yields exactly the requested owned rows in ascending order; an empty range yields no items; invalid ranges are rejected when creating the iterator.                                                                                                            | `rust_serial_file/tests/file_metadata.rs` | `standard_iterator_yields_selected_range`            | ✅ Success |
+| T-022   | `RSF-FILE-FR-017`, `RSF-FILE-DS-010`                                                                                                | Cause a row read failure during standard iteration, then call `next` again.                                                                                                 | The failing row yields `Some(Err(_))`, and the iterator returns `None` thereafter.                                                                                                                                                                                | `rust_serial_file/tests/file_metadata.rs` | `standard_iterator_stops_after_read_error`           | ✅ Success |
+| T-023   | `RSF-FILE-FR-018`, `RSF-FILE-DS-011`, `RSF-FILE-DS-012`, `RSF-FILE-RS-014`                                                          | Read multiple contiguous rows into a caller-provided buffer, including an empty block, and try a partial-row buffer and an out-of-range block.                              | Complete rows are copied in ascending order without output allocation; valid empty blocks succeed; invalid sizes and ranges return errors without partial-range reads.                                                                                            | `rust_serial_file/tests/file_metadata.rs` | `reads_contiguous_row_blocks`                        | ✅ Success |
+| T-024   | `RSF-FILE-FR-019`, `RSF-FILE-DS-011`, `RSF-FILE-DS-012`, `RSF-FILE-RS-014`                                                          | Write multiple contiguous rows from a caller-provided buffer, including an empty block, and try a partial-row buffer and an out-of-range block.                             | Existing rows are replaced in order without changing the data-region length; valid empty blocks succeed without padding; invalid ranges do not extend the data region. A short metadata prefix may be padded before an out-of-range error.                        | `rust_serial_file/tests/file_metadata.rs` | `writes_contiguous_row_blocks`                       | ✅ Success |
+| T-025   | `RSF-FILE-FR-020`, `RSF-FILE-FR-022`, `RSF-FILE-DS-013`, `RSF-FILE-DS-015`, `RSF-FILE-RS-015`                                       | Append one row to empty and non-empty data regions, including a file with trailing incomplete-row bytes and one shorter than `data_offset`; reject an incorrect row size.   | The row overwrites the incomplete suffix, the file ends immediately after the new complete row, missing metadata is zero-padded, and invalid input length causes no mutation.                                                                                     | `rust_serial_file/tests/file_metadata.rs` | `appends_rows_and_discards_partial_suffix`           | ✅ Success |
+| T-026   | `RSF-FILE-FR-021`, `RSF-FILE-FR-022`, `RSF-FILE-DS-014`, `RSF-FILE-DS-015`, `RSF-FILE-RS-015`                                       | Insert rows at the beginning, middle, and end with a trailing incomplete suffix or a file shorter than `data_offset`; reject an invalid index and row size.                 | Inserted rows occupy the requested index, later complete rows remain byte-for-byte ordered, incomplete trailing bytes are discarded, and the missing prefix is zero-padded.                                                                                       | `rust_serial_file/tests/file_metadata.rs` | `inserts_rows_and_discards_partial_suffix`           | ✅ Success |
+| T-027   | `RSF-FILE-FR-014`, `RSF-FILE-FR-018`, `RSF-FILE-FR-019`, `RSF-FILE-FR-022`, `RSF-FILE-DS-015`, `RSF-FILE-RS-016`                    | Attempt non-empty row and block replacements on a file shorter than `data_offset`, then write to valid existing rows and invalid missing rows.                              | Missing metadata is zero-padded before row-range validation; replacement writes succeed only for existing complete rows and never create or pad data rows.                                                                                                        | `rust_serial_file/tests/file_metadata.rs` | `pads_metadata_before_replacement_write_validation`  | ✅ Success |
+| T-028   | `RSF-FILE-FR-023`, `RSF-FILE-DS-016`                                                                                                | Reserve zero, the current capacity, and a larger capacity, including a file with a short metadata prefix.                                                                   | Requests at or below capacity do not change file length; growth zero-pads missing metadata and preserves existing bytes; newly extended bytes are zero, current logical row count is unchanged, and appending/inserting within capacity does not extend the file. | `rust_serial_file/tests/file_metadata.rs` | `reserves_rows_and_preserves_existing_offsets`       | ✅ Success |
+| T-029   | `RSF-FILE-FR-023`                                                                                                                   | Request a row count whose target file size overflows and attempt reservation through a read-only file handle.                                                               | Overflow and file-extension failures are returned; no success-shaped result is reported.                                                                                                                                                                          | `rust_serial_file/tests/file_metadata.rs` | `reports_row_reservation_failures`                   | ✅ Success |
+| T-030   | `RSF-FILE-FR-023`, `RSF-FILE-DS-016`                                                                                                | Reopen a file after reserving capacity without appending all reserved rows.                                                                                                 | The original instance retains its logical count; a newly opened instance interprets complete rows implied by file length as existing rows.                                                                                                                        | `rust_serial_file/tests/file_metadata.rs` | `reopening_treats_reserved_rows_as_existing_rows`    | ✅ Success |
 
 ### Acceptance criteria
 
@@ -657,11 +667,12 @@ The following tests are planned and have not yet been run.
    buffer-filling iteration use caller-provided buffers; append/insertion
    discard invalid trailing partial rows and row mutations pad missing
    metadata bytes. Row reservation obeys its monotonic no-op rule, preserves
-   existing byte offsets, and physically reserves the requested size.
+   existing byte offsets, and extends the file to the requested capacity
+   without changing the current instance's logical row count.
    Conventional full/ranged iterators implement `Iterator` and yield fallible
    owned row vectors.
-7. Row reservation returns an observable error if physical allocation is
-   unsupported or fails; it does not silently fall back to sparse extension.
+7. Row reservation returns observable file-extension errors and does not
+   promise physical disk-block allocation.
 8. Zero element size, offset boundaries, trailing partial elements, and
    filesystem errors have explicit tested behavior.
 9. Length/count queries do not change file contents or cursor position.
@@ -674,7 +685,8 @@ Include the coverage tool, measured scope, percentages, and any remaining
 uncovered behavior. Do not exclude relevant production code to increase the
 reported percentage.
 
-- **Coverage summary:** Not measured; implementation and tests have not started.
+- **Coverage summary:** Not measured. The integration suite has 28 passing
+  tests; coverage instrumentation was not run.
 
 ## Out of scope
 

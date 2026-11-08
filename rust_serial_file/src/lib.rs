@@ -1,3 +1,3 @@
 pub mod adapter;
-// pub mod file;
+pub mod file;
 pub mod serialized_struct;
