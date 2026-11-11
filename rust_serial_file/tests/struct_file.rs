@@ -1,6 +1,7 @@
 use std::{
     fs::{File, OpenOptions},
     io::{Read, Seek, Write},
+    sync::Arc,
 };
 
 use rust_serial_file::{
@@ -8,7 +9,11 @@ use rust_serial_file::{
         abstract_data_container::SerialDataContainer, abstract_serial_read::SerialDataReader,
         abstract_serial_write::SerialDataWriter,
     },
-    file::{file_metadata::FileMetadata, struct_file::StructFile},
+    file::{
+        file_lock::FileLock,
+        file_metadata::FileMetadata,
+        struct_file::{StructFile, StructReadOnlyFile, StructWriteFile},
+    },
     serialized_struct::{self, DecodeRaw, EncodeRaw, SerializedStruct},
 };
 use tempfile::tempdir;
@@ -583,4 +588,106 @@ fn struct_file_reads_through_a_shared_reference() {
     let also_shared = &file;
     read_shared(shared);
     assert_eq!(also_shared.read_value_at(0).unwrap(), record(1));
+}
+
+/// Reads every record through any read-only view.
+fn read_records<V: SerialDataReader<Record>>(view: &V) -> Vec<Record> {
+    view.serial_iter()
+        .unwrap()
+        .collect::<anyhow::Result<_>>()
+        .unwrap()
+}
+
+#[test]
+fn read_only_views_share_borrowed_metadata() {
+    let bytes = encoded(&[record(1), record(2), record(3)]);
+    let (_directory, _path, metadata) = open_metadata(&bytes, Record::SIZE as u64, 0);
+
+    let first = StructReadOnlyFile::<Record>::new(&metadata).unwrap();
+    let second = StructReadOnlyFile::<Record>::new(&metadata).unwrap();
+    let mut iter = first.serial_iter().unwrap();
+    assert_eq!(iter.next().unwrap().unwrap(), record(1));
+    assert_eq!(second.serial_get(2).unwrap(), record(3));
+    assert_eq!(second.serial_find(&record(2)).unwrap(), Some(1));
+    assert_eq!(iter.next().unwrap().unwrap(), record(2));
+    assert_eq!(first.file_metadata().element_size(), Record::SIZE as u64);
+    assert!(std::ptr::eq(second.into_inner(), &metadata));
+
+    let shared = Arc::new(metadata);
+    let arc_view = StructFile::<Record, Arc<FileMetadata>>::new(Arc::clone(&shared)).unwrap();
+    assert_eq!(read_records(&arc_view), [record(1), record(2), record(3)]);
+}
+
+#[test]
+fn writable_view_changes_are_seen_by_later_views() {
+    let bytes = encoded(&[record(1), record(4)]);
+    let (_directory, _path, mut metadata) = open_metadata(&bytes, Record::SIZE as u64, 0);
+
+    {
+        let mut writer = StructWriteFile::<Record>::new(&mut metadata).unwrap();
+        writer.serial_write(record(6)).unwrap();
+        writer.serial_insert(1, record(2)).unwrap();
+        writer.serial_auto_insert(record(5)).unwrap();
+        writer.serial_remove(0).unwrap();
+        assert_eq!(writer.serial_len(), 4);
+    }
+    assert_eq!(metadata.element_count().unwrap(), 4);
+
+    let expected = [record(2), record(4), record(5), record(6)];
+    let reader = StructReadOnlyFile::<Record>::new(&metadata).unwrap();
+    assert_eq!(reader.serial_len(), 4);
+    assert_eq!(read_records(&reader), expected);
+
+    let owned = StructFile::<Record>::new(metadata).unwrap();
+    assert_eq!(read_records(&owned), expected);
+}
+
+#[test]
+fn as_read_only_copies_length_without_io() {
+    let bytes = encoded(&[record(1), record(2)]);
+    let (_directory, _path, mut metadata) = open_metadata(&bytes, Record::SIZE as u64, 0);
+
+    {
+        let mut writer = StructWriteFile::<Record>::new(&mut metadata).unwrap();
+        writer.serial_write(record(3)).unwrap();
+        let view = writer.as_read_only();
+        assert_eq!(view.serial_len(), 3);
+        assert_eq!(read_records(&view), [record(1), record(2), record(3)]);
+    }
+
+    let owned = StructFile::<Record>::new(metadata).unwrap();
+    let view = owned.as_read_only();
+    let other = owned.as_read_only();
+    assert_eq!(view.serial_len(), owned.serial_len());
+    assert_eq!(other.serial_last().unwrap(), record(3));
+}
+
+#[test]
+fn views_work_through_file_lock_guards() {
+    let bytes = encoded(&[record(1)]);
+    let (_directory, _path, metadata) = open_metadata(&bytes, Record::SIZE as u64, 0);
+    let lock = FileLock::new(metadata);
+
+    {
+        let mut guard = lock.write().unwrap();
+        let mut writer = StructWriteFile::<Record>::new(&mut *guard).unwrap();
+        writer.serial_write(record(2)).unwrap();
+        writer.serial_write(record(3)).unwrap();
+    }
+
+    let first_guard = lock.read().unwrap();
+    let second_guard = lock.read().unwrap();
+    let first = StructReadOnlyFile::<Record>::new(&*first_guard).unwrap();
+    let second = StructReadOnlyFile::<Record>::new(&*second_guard).unwrap();
+    assert_eq!(read_records(&first), [record(1), record(2), record(3)]);
+    assert_eq!(second.serial_get(2).unwrap(), record(3));
+}
+
+#[test]
+fn views_are_send_and_sync() {
+    fn assert_send_sync<V: Send + Sync>() {}
+
+    assert_send_sync::<StructFile<Record>>();
+    assert_send_sync::<StructReadOnlyFile<'static, Record>>();
+    assert_send_sync::<StructWriteFile<'static, Record>>();
 }

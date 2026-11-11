@@ -1,4 +1,8 @@
-use std::{marker::PhantomData, path::Path};
+use std::{
+    borrow::{Borrow, BorrowMut},
+    marker::PhantomData,
+    path::Path,
+};
 
 use anyhow::{Context, Result, bail};
 
@@ -16,28 +20,86 @@ use super::file_metadata::FileMetadata;
 const SHIFT_BUFFER_BYTES: usize = 64 * 1024;
 const STACK_ROW_BUFFER_BYTES: usize = 1024;
 
-/// A typed serial collection that owns its fixed-width file metadata.
-pub struct StructFile<T: SerializedStruct> {
-    metadata: FileMetadata,
+/// A typed serial collection over the fixed-width rows of a [`FileMetadata`].
+///
+/// `M` is how the collection holds its metadata. It defaults to an owned
+/// [`FileMetadata`]; it can also be a borrow such as `&FileMetadata` (see
+/// [`StructReadOnlyFile`]) or `&mut FileMetadata` (see [`StructWriteFile`]),
+/// or any other holder that implements [`Borrow<FileMetadata>`], such as
+/// `Box<FileMetadata>` or `Arc<FileMetadata>`. Reading needs
+/// `M: Borrow<FileMetadata>`; writing needs `M: BorrowMut<FileMetadata>`.
+/// A holder that only dereferences to a `FileMetadata`, such as a lock guard,
+/// is used through a reborrow: `StructFile::new(&*guard)` or
+/// `StructFile::new(&mut *guard)`.
+///
+/// `M`'s `borrow` and `borrow_mut` must return the same `FileMetadata` for
+/// the whole life of the collection. A holder that breaks this can make
+/// results wrong, for example a stale length, but never memory-unsafe:
+/// out-of-range rows are still reported as errors by `FileMetadata`.
+///
+/// `StructFile<T, M>` is `Send` and `Sync` whenever `T` and `M` are. Views
+/// over `&FileMetadata` and `&mut FileMetadata` are therefore `Send` and
+/// `Sync` when `T` is, because `FileMetadata` is.
+pub struct StructFile<T: SerializedStruct, M = FileMetadata> {
+    metadata: M,
     len: usize,
     _record: PhantomData<T>,
 }
 
-impl<T: SerializedStruct> StructFile<T> {
+/// Read-only view over borrowed file metadata.
+///
+/// Several read-only views of the same `FileMetadata` may exist at once. A
+/// read-only view implements only the reader trait, so writing through it
+/// does not compile:
+///
+/// ```compile_fail,E0599
+/// use rust_serial_file::{
+///     adapter::abstract_serial_write::SerialDataWriter,
+///     file::struct_file::StructReadOnlyFile, serialized_struct::SerializedStruct,
+/// };
+///
+/// fn append<T: SerializedStruct>(view: &mut StructReadOnlyFile<'_, T>, value: T) {
+///     view.serial_write(value).unwrap();
+/// }
+/// ```
+pub type StructReadOnlyFile<'a, T> = StructFile<T, &'a FileMetadata>;
+
+/// Writable view over mutably borrowed file metadata.
+///
+/// After the view is dropped, the borrowed `FileMetadata` reflects all of its
+/// successful writes, and a new view built from it sees them:
+///
+/// ```
+/// use rust_serial_file::{
+///     adapter::abstract_serial_write::SerialDataWriter,
+///     file::struct_file::StructWriteFile, serialized_struct::SerializedStruct,
+/// };
+///
+/// fn append<T: SerializedStruct>(view: &mut StructWriteFile<'_, T>, value: T) {
+///     view.serial_write(value).unwrap();
+/// }
+/// ```
+pub type StructWriteFile<'a, T> = StructFile<T, &'a mut FileMetadata>;
+
+impl<T: SerializedStruct, M: Borrow<FileMetadata>> StructFile<T, M> {
     /// Wraps file metadata after checking its row width against `T::SIZE`.
-    pub fn new(metadata: FileMetadata) -> Result<Self> {
+    ///
+    /// The collection length is read from the metadata, so a view built after
+    /// another view was dropped sees all of that view's changes.
+    pub fn new(metadata: M) -> Result<Self> {
         if T::SIZE == 0 {
             bail!("serialized row size must be greater than zero");
         }
-        if u64::try_from(T::SIZE)? != metadata.element_size() {
+        let file: &FileMetadata = metadata.borrow();
+        if u64::try_from(T::SIZE)? != file.element_size() {
             bail!(
                 "file row width ({}) does not match serialized row size ({})",
-                metadata.element_size(),
+                file.element_size(),
                 T::SIZE
             );
         }
 
-        let len = usize::try_from(metadata.element_count()?)
+        let len = usize::try_from(file.element_count()?)
             .context("file row count does not fit in usize")?;
         Ok(Self {
             metadata,
@@ -46,22 +108,28 @@ impl<T: SerializedStruct> StructFile<T> {
         })
     }
 
-    /// Opens or creates a file with rows encoded as `T`.
-    pub fn open_or_create(path: impl AsRef<Path>, data_offset: u64) -> Result<Self> {
-        let element_size =
-            u64::try_from(T::SIZE).context("serialized row size does not fit in u64")?;
-        let metadata = FileMetadata::open_or_create(path, element_size, data_offset)?;
-        Self::new(metadata)
-    }
-
-    /// Returns immutable access to the owned file metadata.
+    /// Returns immutable access to the file metadata.
     pub fn file_metadata(&self) -> &FileMetadata {
-        &self.metadata
+        self.metadata.borrow()
     }
 
-    /// Consumes the collection and returns its file metadata.
-    pub fn into_file_metadata(self) -> FileMetadata {
+    /// Consumes the collection and returns its metadata holder.
+    pub fn into_inner(self) -> M {
         self.metadata
+    }
+
+    /// Returns a read-only view of the same rows.
+    ///
+    /// This cannot fail and performs no file I/O: the view copies this
+    /// collection's cached length, which cannot change while the view borrows
+    /// `self`. There is deliberately no writable equivalent, because writes
+    /// through it would leave this collection's cached length stale.
+    pub fn as_read_only(&self) -> StructReadOnlyFile<'_, T> {
+        StructFile {
+            metadata: self.file_metadata(),
+            len: self.len,
+            _record: PhantomData,
+        }
     }
 
     /// Reads and decodes the record at `index`.
@@ -70,20 +138,56 @@ impl<T: SerializedStruct> StructFile<T> {
         let file_index = to_file_index(index)?;
         if T::SIZE <= STACK_ROW_BUFFER_BYTES {
             let mut row = [0; STACK_ROW_BUFFER_BYTES];
-            self.metadata.read_row(file_index, &mut row[..T::SIZE])?;
+            self.file_metadata()
+                .read_row(file_index, &mut row[..T::SIZE])?;
             T::try_decode(&row[..T::SIZE])
         } else {
             let mut row = allocate_bytes(T::SIZE, "record row")?;
-            self.metadata.read_row(file_index, &mut row)?;
+            self.file_metadata().read_row(file_index, &mut row)?;
             T::try_decode(&row)
         }
+    }
+
+    fn validate_existing_index(&self, index: usize) -> Result<()> {
+        if index >= self.len {
+            bail!(
+                "record index {index} is out of bounds for {} records",
+                self.len
+            );
+        }
+        Ok(())
+    }
+}
+
+impl<T: SerializedStruct> StructFile<T, FileMetadata> {
+    /// Opens or creates a file with rows encoded as `T`.
+    pub fn open_or_create(path: impl AsRef<Path>, data_offset: u64) -> Result<Self> {
+        let element_size =
+            u64::try_from(T::SIZE).context("serialized row size does not fit in u64")?;
+        let metadata = FileMetadata::open_or_create(path, element_size, data_offset)?;
+        Self::new(metadata)
+    }
+
+    /// Consumes the collection and returns its owned file metadata.
+    pub fn into_file_metadata(self) -> FileMetadata {
+        self.metadata
+    }
+}
+
+impl<T: SerializedStruct, M: BorrowMut<FileMetadata>> StructFile<T, M> {
+    /// Mutable access for this collection's own writes only. It stays private
+    /// so no caller can change the file behind the cached length.
+    fn file_metadata_mut(&mut self) -> &mut FileMetadata {
+        self.metadata.borrow_mut()
     }
 
     /// Encodes and replaces the record at `index`.
     pub fn write_value_at(&mut self, index: usize, value: &T) -> Result<()> {
         self.validate_existing_index(index)?;
         let file_index = to_file_index(index)?;
-        with_encoded_value(value, |row| self.metadata.write_row(file_index, row))
+        with_encoded_value(value, |row| {
+            self.file_metadata_mut().write_row(file_index, row)
+        })
     }
 
     /// Encodes records in slice order, replacing from row zero and appending
@@ -120,18 +224,8 @@ impl<T: SerializedStruct> StructFile<T> {
             }
         }
 
-        self.metadata.write_rows(0, &rows)?;
+        self.file_metadata_mut().write_rows(0, &rows)?;
         self.len = new_len;
-        Ok(())
-    }
-
-    fn validate_existing_index(&self, index: usize) -> Result<()> {
-        if index >= self.len {
-            bail!(
-                "record index {index} is out of bounds for {} records",
-                self.len
-            );
-        }
         Ok(())
     }
 
@@ -155,9 +249,9 @@ impl<T: SerializedStruct> StructFile<T> {
             let byte_len = rows_to_move
                 .checked_mul(T::SIZE)
                 .context("row shift byte length overflow")?;
-            self.metadata
+            self.file_metadata()
                 .read_rows(to_file_index(source)?, &mut buffer[..byte_len])?;
-            self.metadata
+            self.file_metadata_mut()
                 .write_rows(to_file_index(destination)?, &buffer[..byte_len])?;
             destination = destination
                 .checked_add(rows_to_move)
@@ -167,14 +261,14 @@ impl<T: SerializedStruct> StructFile<T> {
     }
 }
 
-/// Reads records through `&self`.
+/// Reads records through `&self`, for any metadata holder.
 ///
-/// Rows are read with positioned reads on the owned file, so reads keep no
-/// mutable state in the collection: indexed reads and searches may run while
-/// an iterator is alive, and each iterator owns its own [`BufferedReader`].
-/// `StructFile<T>` is `Send` and `Sync` whenever `T` is; shared reads from
-/// several threads are safe because writes require `&mut self`.
-impl<T: SerializedStruct> SerialDataReader<T> for StructFile<T> {
+/// Rows are read with positioned reads on the file, so reads keep no mutable
+/// state in the collection: indexed reads and searches may run while an
+/// iterator is alive, and each iterator owns its own [`BufferedReader`].
+/// Shared reads from several threads are safe because writes require
+/// `&mut self`.
+impl<T: SerializedStruct, M: Borrow<FileMetadata>> SerialDataReader<T> for StructFile<T, M> {
     type Iter<'a>
         = StructFileIter<'a, T>
     where
@@ -191,7 +285,7 @@ impl<T: SerializedStruct> SerialDataReader<T> for StructFile<T> {
 
     fn serial_iter(&self) -> Result<Self::Iter<'_>> {
         Ok(StructFileIter {
-            reader: BufferedReader::new(&self.metadata)?,
+            reader: BufferedReader::new(self.file_metadata())?,
             next_index: 0,
             end_index: self.len,
             _record: PhantomData,
@@ -199,10 +293,11 @@ impl<T: SerializedStruct> SerialDataReader<T> for StructFile<T> {
     }
 }
 
-impl<T: SerializedStruct> SerialDataWriter<T> for StructFile<T> {
+/// Writes records when the collection can mutably access its metadata.
+impl<T: SerializedStruct, M: BorrowMut<FileMetadata>> SerialDataWriter<T> for StructFile<T, M> {
     fn serial_write(&mut self, value: T) -> Result<()> {
         let new_len = self.len.checked_add(1).context("record count overflow")?;
-        with_encoded_value(&value, |row| self.metadata.append_row(row))?;
+        with_encoded_value(&value, |row| self.file_metadata_mut().append_row(row))?;
         self.len = new_len;
         Ok(())
     }
@@ -216,7 +311,9 @@ impl<T: SerializedStruct> SerialDataWriter<T> for StructFile<T> {
         }
         let new_len = self.len.checked_add(1).context("record count overflow")?;
         let file_index = to_file_index(index)?;
-        with_encoded_value(&value, |row| self.metadata.insert_row(file_index, row))?;
+        with_encoded_value(&value, |row| {
+            self.file_metadata_mut().insert_row(file_index, row)
+        })?;
         self.len = new_len;
         Ok(())
     }
@@ -229,7 +326,8 @@ impl<T: SerializedStruct> SerialDataWriter<T> for StructFile<T> {
         self.validate_existing_index(index)?;
         let new_len = self.len - 1;
         self.shift_rows_left(index, new_len)?;
-        self.metadata.truncate_rows(to_file_index(new_len)?)?;
+        self.file_metadata_mut()
+            .truncate_rows(to_file_index(new_len)?)?;
         self.len = new_len;
         Ok(())
     }
@@ -239,13 +337,14 @@ impl<T: SerializedStruct> SerialDataWriter<T> for StructFile<T> {
         let removed = self.read_value_at(index)?;
         let new_len = self.len - 1;
         self.shift_rows_left(index, new_len)?;
-        self.metadata.truncate_rows(to_file_index(new_len)?)?;
+        self.file_metadata_mut()
+            .truncate_rows(to_file_index(new_len)?)?;
         self.len = new_len;
         Ok(removed)
     }
 
     fn serial_clear(&mut self) -> Result<()> {
-        self.metadata.truncate_rows(0)?;
+        self.file_metadata_mut().truncate_rows(0)?;
         self.len = 0;
         Ok(())
     }
@@ -254,13 +353,14 @@ impl<T: SerializedStruct> SerialDataWriter<T> for StructFile<T> {
         if len >= self.len {
             return Ok(());
         }
-        self.metadata.truncate_rows(to_file_index(len)?)?;
+        self.file_metadata_mut()
+            .truncate_rows(to_file_index(len)?)?;
         self.len = len;
         Ok(())
     }
 }
 
-impl<T: SerializedStruct> SerialDataContainer<T> for StructFile<T> {}
+impl<T: SerializedStruct, M: BorrowMut<FileMetadata>> SerialDataContainer<T> for StructFile<T, M> {}
 
 /// Fallible iterator over typed file records in row order.
 pub struct StructFileIter<'file, T: SerializedStruct> {
