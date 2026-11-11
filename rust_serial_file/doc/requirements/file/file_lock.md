@@ -2,8 +2,8 @@
 
 - **Date:** 2026-11-11
 - **Author:** `Olographik`
-- **Revision:** 0.4
-- **Short description:** Define a `FileLock` that owns a `FileMetadata` behind a reader-writer lock, granting many concurrent read borrows or one exclusive write borrow, each held until its guard is released.
+- **Revision:** 0.5
+- **Short description:** Define a `FileLock` that owns a `FileMetadata` behind a reader-writer lock, granting many concurrent read borrows or one exclusive write borrow, each held until its guard is released, with guards usable directly as `StructFile` storage.
 
 ## Table of contents
 
@@ -68,6 +68,15 @@ finish the interrupted work, undo it, or reopen the file from disk. A
 generation counter, increased each time a write guard is released normally,
 lets callers check whether write sessions completed.
 
+Since revision 0.5, the guards also implement `Borrow<FileMetadata>` (and the
+write guard `BorrowMut<FileMetadata>`). `StructFile<T, M>` accepts any `M`
+with those bounds, so a typed view can **hold its guard directly**, for
+example `StructFile<Record, FileReadGuard<'_>>`, and keeps the lock for as
+long as the view lives. Before, a view could only be built from a reborrow
+(`&*guard`), so the guard and the view had to be kept side by side. This lets
+a future `FileAtlas` hand out a single value that is both the lock and the
+typed view. `FileLock` still does not know about `StructFile`.
+
 ## Revisions
 
 | Revision | Date | Author | Changes |
@@ -75,6 +84,7 @@ lets callers check whether write sessions completed.
 | 0.2 | 2026-11-11 | `Olographik` | Added `FL-RS-006` (doc comments warn that locking is in-process only). Resolved the operating-system lock decision: it belongs to a future `FileAtlas`, not to `FileLock`. Added the in-process caution to Overview, Assumptions, and Safety, and updated the P-006 completion criteria, planning reflection, and Out of scope. |
 | 0.3 | 2026-11-11 | `Olographik` | Poison recovery and tracking. Added `FL-FR-013` (write-guard snapshot and `PoisonReport`), `FL-FR-014` (`recover`), `FL-FR-015` (generation counter), `FL-FR-016` (limits of the report), and `FL-RS-007` (guard `Drop` never panics). Modified `FL-FR-012` (errors until `recover`), `FL-DS-002` (write acquisition reads the file length), and `FL-RS-003` (atomic generation counter allowed). Added phase P-005 (poison tracking and recovery); Coverage and Documentation renumbered to P-006 and P-007. Added tests T-019 to T-023. Updated Overview, Public API, Errors, Performance, planning reflection, and Out of scope (poison recovery resolved; mid-operation I/O errors recorded as an open issue). |
 | 0.4 | 2026-11-11 | `Olographik` | Buffered reader and writer integration. Added `FL-FR-017` (read guard usable with `BufferedReader`), `FL-FR-018` (write guard usable with `BufferedWriter`), and `FL-FR-019` (a `BufferedWriter` borrowing the write guard is flushed before the lock is released, including during unwinding). Added phase P-006 (buffered integration tests); Coverage and Documentation renumbered to P-007 and P-008 and redone. Added tests T-024 to T-030. Updated Scope, Compatibility, implementation reflection, and notes. |
+| 0.5 | 2026-11-11 | `Olographik` | Guards usable as `StructFile` storage. Added `FL-FR-020` (`Borrow<FileMetadata>` for `FileReadGuard`), `FL-FR-021` (`Borrow` and `BorrowMut<FileMetadata>` for `FileWriteGuard`), `FL-FR-022` (a `StructFile` holding a guard keeps the lock for its lifetime), and `FL-RS-008` (`Borrow` impls agree with `Deref`, no `unsafe`, no dependency on `StructFile`). Added phases P-007 (`Borrow` impls) and P-008 (`StructFile` integration tests); Coverage and Documentation renumbered to P-009 and P-010 and unchecked. Added tests T-031 to T-034. Updated Overview, Scope, Public API, Compatibility, planning reflection, and Out of scope. |
 
 ## Goals and scope
 
@@ -108,6 +118,12 @@ lets callers check whether write sessions completed.
   `&mut FileMetadata`) and do not take ownership; they are used with
   `FileLock` by borrowing through a guard (`FL-FR-017` to `FL-FR-019`). `FileLock` only composes
   `FileMetadata`; it does not reimplement or wrap its row operations.
+- Revision 0.5 adds `Borrow<FileMetadata>` and `BorrowMut<FileMetadata>`
+  impls to the guards in `src/file/file_lock.rs`, so `StructFile` (which
+  needs `M: Borrow<FileMetadata>` to read and `M: BorrowMut<FileMetadata>`
+  to write) can hold a guard. `StructFile`, `FileMetadata`, and the buffered
+  types are not changed. `doc/requirements/file/struct_file.md` is updated to
+  record that its deferred item is resolved.
 
 ## Assumptions and dependencies
 
@@ -155,6 +171,9 @@ lets callers check whether write sessions completed.
 | `FL-FR-017` | A `BufferedReader` can be built from a read guard (`BufferedReader::new(&guard)` or `with_capacity`) through `Deref`, without any change to `BufferedReader`. It borrows the guard, so the read lock is held while the reader is alive; several buffered readers, each on its own read guard, can run at the same time on different threads. | 0.4 |
 | `FL-FR-018` | A `BufferedWriter` can be built from a write guard (`BufferedWriter::new(&mut guard)` or `with_capacity`) through `DerefMut`, without any change to `BufferedWriter`. It borrows the guard mutably, so the write lock is held while the writer is alive, and the guard can be used again once the writer is dropped. | 0.4 |
 | `FL-FR-019` | Because a `BufferedWriter` borrows its write guard, it is always dropped before the guard, so its `Drop` flush writes pending rows to the file before the write lock is released; readers acquiring the lock afterwards see them. During panic unwinding the same order holds, so the `after` snapshot of the `PoisonReport` includes the flushed rows. Flush errors in `BufferedWriter::drop` stay ignored as today; callers that need to observe them call `flush()` explicitly before dropping the writer. | 0.4 |
+| `FL-FR-020` | `FileReadGuard` implements `Borrow<FileMetadata>`. `borrow()` returns the same `FileMetadata` as `Deref`. It gives no mutable access; `FileReadGuard` does not implement `BorrowMut`. | 0.5 |
+| `FL-FR-021` | `FileWriteGuard` implements `Borrow<FileMetadata>` and `BorrowMut<FileMetadata>`. `borrow()` and `borrow_mut()` return the same `FileMetadata` as `Deref` and `DerefMut`. Changes made through `borrow_mut()` follow the same rules as changes through `DerefMut`: they are visible after the guard is dropped (`FL-FR-009`), and the drop updates the generation counter or stores a `PoisonReport` as before (`FL-FR-013`, `FL-FR-015`). | 0.5 |
+| `FL-FR-022` | As a result of `FL-FR-020` and `FL-FR-021`, `StructFile<T, FileReadGuard<'_>>` is a read-only typed view and `StructFile<T, FileWriteGuard<'_>>` a writable one, without any change to `StructFile`. A view holding a guard keeps the lock for its whole lifetime and releases it when the view is dropped. `StructFile::into_inner` returns the guard, which can then be used or dropped as any guard. | 0.5 |
 
 ### Data and serialization
 
@@ -174,6 +193,7 @@ lets callers check whether write sessions completed.
 | `FL-RS-005` | The module uses Rust edition 2024 and contains no `unsafe` code. | 0.1 |
 | `FL-RS-006` | The doc comments of `FileLock`, `read`, and `write` state that the lock only coordinates threads sharing this `FileLock`, that it takes no operating-system file lock, that OS locking is expected to be handled by the component owning the opened files (the planned `FileAtlas`), and that without it the caller must ensure no other process or handle accesses the file. | 0.2 |
 | `FL-RS-007` | The `Drop` implementation of `FileWriteGuard` never panics: it uses no `unwrap` or `expect`, and a failure while taking the `after` snapshot is recorded as `after: None`. `FileSnapshot` and `PoisonReport` implement `Debug`, `Clone`, `PartialEq`, and `Eq`. | 0.3 |
+| `FL-RS-008` | The `Borrow` and `BorrowMut` impls delegate to the existing `Deref` and `DerefMut` impls and contain no `unsafe` code. `FileMetadata` implements none of `Eq`, `Ord`, or `Hash`, so the `Borrow` contract about consistent comparison and hashing has nothing to violate. `src/file/file_lock.rs` shall not import or name `StructFile` or `SerializedStruct`. | 0.5 |
 
 ## Public API
 
@@ -222,10 +242,25 @@ pub struct PoisonReport {
 
 pub struct FileReadGuard<'a> { /* RwLockReadGuard<'a, FileMetadata> */ }
 impl Deref for FileReadGuard<'_> { type Target = FileMetadata; }
+impl Borrow<FileMetadata> for FileReadGuard<'_> {}          // revision 0.5
 
 pub struct FileWriteGuard<'a> { /* RwLockWriteGuard<'a, FileMetadata> */ }
 impl Deref for FileWriteGuard<'_> { type Target = FileMetadata; }
 impl DerefMut for FileWriteGuard<'_> {}
+impl Borrow<FileMetadata> for FileWriteGuard<'_> {}         // revision 0.5
+impl BorrowMut<FileMetadata> for FileWriteGuard<'_> {}      // revision 0.5
+```
+
+Typed views holding a guard (revision 0.5):
+
+```rust
+let lock = FileLock::open_or_create(path, Record::SIZE as u64, 0)?;
+{
+    let mut writer = StructFile::<Record, _>::new(lock.write()?)?;
+    writer.serial_write(record)?;
+}                                   // view and write lock dropped together
+let reader = StructFile::<Record, _>::new(lock.read()?)?;
+let value = reader.serial_get(0)?;  // read lock held while `reader` lives
 ```
 
 `Result` is `anyhow::Result`, as in the rest of the crate. Usage example:
@@ -306,6 +341,14 @@ if let Some(report) = lock.recover()? {
 - The public API of `FileMetadata`, `StructFile`, `BufferedReader`, and
   `BufferedWriter` is unchanged. The only change outside the new file is the
   `pub mod file_lock;` line in `src/file/mod.rs`.
+- Revision 0.5 is additive: two new trait impls on each guard type, and no
+  signature changes. One theoretical source break: downstream code that calls
+  `guard.borrow()` with `std::borrow::Borrow` in scope and relies on inference
+  to pick the blanket `Borrow<Self>` impl may now need a type
+  annotation, because a second `Borrow` impl exists. No code in this
+  workspace does that.
+- Building a `StructFile` from a reborrow (`&*guard`, `&mut *guard`), the
+  only option before revision 0.5, keeps working.
 - `BufferedReader` and `BufferedWriter` work with `FileLock` without any
   change, by borrowing the `FileMetadata` through a read or write guard
   (`FL-FR-017`, `FL-FR-018`).
@@ -344,8 +387,10 @@ if let Some(report) = lock.recover()? {
 | P-004 | **Multi-threaded tests:** add the thread-based tests that check concurrent readers, writer exclusion, release on drop, and on-disk compatibility. | P-003 | T-015, T-016, T-017, and T-018 pass reliably on 10 repeated runs; `cargo fmt --check`, `cargo clippy`, and `cargo test` pass. |
 | P-005 | **Poison tracking and recovery:** add `FileSnapshot` and `PoisonReport`, take the snapshot in `write` / `try_write`, store the report from the write guard's `Drop` when panicking, implement `recover` (`PoisonError::into_inner` and `RwLock::clear_poison`) and the `generation` counter. | P-003 | T-019, T-020, T-021, T-022, and T-023 pass; T-014 still passes. |
 | P-006 | **Buffered integration tests:** add tests that build `BufferedReader` from read guards and `BufferedWriter` from write guards, including concurrency, flush-on-drop ordering, and poisoning with a live writer. No change to the buffered files is allowed; if the API did not work, the gap is recorded here instead. | P-005 | T-024 to T-030 pass on 10 repeated runs; `src/file/buffered_reader.rs` and `src/file/buffered_writer.rs` are unchanged. |
-| P-007 | **Coverage:** run the tests with coverage for the touched files only and record the results in [Code coverage](#code-coverage). | P-001, P-002, P-003, P-004, P-005, P-006 | Coverage is measured for every touched file, the results are recorded, and any uncovered code is justified. |
-| P-008 | **Documentation:** update this requirements document and the code comments of the touched files. | P-007 | The document matches the implemented behavior and test results; public items in the touched files have up-to-date doc comments, including the in-process-only caution of `FL-RS-006` and the re-entrancy warning. |
+| P-007 | **`Borrow` impls:** add `impl Borrow<FileMetadata> for FileReadGuard<'_>`, and `impl Borrow<FileMetadata>` and `impl BorrowMut<FileMetadata>` for `FileWriteGuard<'_>`, each delegating to `Deref` / `DerefMut`, with doc comments naming `StructFile` storage as the purpose. | P-006 | The crate builds; T-001 to T-030 pass unchanged; `file_lock.rs` names no `StructFile` or `SerializedStruct`; T-031 passes. |
+| P-008 | **`StructFile` integration tests:** add tests that use guards directly as `StructFile` storage: concurrent read views, a write view released on drop, `into_inner`, and poisoning with a live write view. | P-007 | T-032 to T-034 pass on 10 repeated runs; `src/file/struct_file.rs` is unchanged. |
+| P-009 | **Coverage:** run the tests with coverage for the touched files only and record the results in [Code coverage](#code-coverage). | P-001 to P-008 | Coverage is measured for every touched file, the results are recorded, and any uncovered code is justified. |
+| P-010 | **Documentation:** update this requirements document, the code comments of the touched files, and `doc/requirements/file/struct_file.md` (its deferred `Borrow` item, Overview, and Compatibility). | P-009 | The document matches the implemented behavior and test results; public items in the touched files have up-to-date doc comments, including the in-process-only caution of `FL-RS-006` and the re-entrancy warning; `struct_file.md` no longer lists the guard `Borrow` impls as deferred. |
 
 ### Current implementation checklist
 
@@ -355,8 +400,10 @@ if let Some(report) = lock.recover()? {
 - [x] P-004 — `Multi-threaded tests` — Done
 - [x] P-005 — `Poison tracking and recovery` — Done
 - [x] P-006 — `Buffered integration tests` — Done
-- [x] P-007 — `Coverage of touched files` — Done
-- [x] P-008 — `Documentation update` — Done
+- [x] P-007 — `Borrow impls on guards` — Done
+- [x] P-008 — `StructFile integration tests` — Done
+- [x] P-009 — `Coverage of touched files` — Done
+- [x] P-010 — `Documentation update` — Done
 
 **Planning reflection (complete before implementation):**
 
@@ -381,6 +428,15 @@ if let Some(report) = lock.recover()? {
   panic-free (`FL-RS-007`), otherwise the process aborts.
   (3) Timing-dependent tests could be flaky; they must use barriers and
   `try_*` checks rather than sleeps where possible.
+- *Revision 0.5 planning:* the change is three small trait impls, so P-007
+  is short; it is split from P-008 so the unchanged T-001 to T-030 prove the
+  impls are additive before the integration tests exist. P-008 depends on
+  P-007 only. Risks: (1) the inference break described in
+  [Compatibility](#compatibility), which no code in this workspace hits;
+  (2) a view that holds a write guard and panics must still produce a
+  `PoisonReport`, which T-034 checks; (3) long-lived views holding a read
+  guard delay writers, which is the same fairness policy as any read guard
+  and is documented, not prevented.
 
 **Implementation reflection (update as work progresses):**
 
@@ -415,6 +471,23 @@ if let Some(report) = lock.recover()? {
   redone after P-006. The buffered API worked as-is through `Deref` /
   `DerefMut`, so `buffered_reader.rs` and `buffered_writer.rs` were not
   changed. `file_lock.rs` was not changed either, so its coverage is the same.
+- Revision 0.5 (before implementation, planned 2026-11-11 at `aa9eaf4`):
+  phases P-007 (`Borrow` impls) and P-008 (`StructFile` integration tests)
+  were added at the user's request, to resolve the deferred item of
+  `struct_file.md` revision 0.3. Coverage and Documentation, which were done,
+  were renumbered from P-007 and P-008 to P-009 and P-010, unchecked, and
+  must be redone after P-008.
+- Revision 0.5 implementation (2026-11-11): the plan held with no
+  deviation. P-007: each impl body is `self`, which deref-coerces to the
+  metadata, so `borrow()` and `Deref` cannot disagree (`FL-RS-008`).
+  T-001 to T-030 passed unchanged, confirming the change is additive, and
+  `file_lock.rs` names no `StructFile` or `SerializedStruct`. P-008: T-031 to
+  T-034 passed on 10 repeated runs, and `src/file/struct_file.rs` was not
+  changed. T-034 confirms that a write view holding its guard behaves like a
+  plain write guard on panic: the view is dropped during unwinding, the guard
+  stores the `PoisonReport` with the rows the view wrote. P-009: coverage
+  rerun; P-010: doc comments added on the three impls, and
+  `doc/requirements/file/struct_file.md` updated to revision 0.4.
 
 ## Testing and acceptance criteria
 
@@ -452,6 +525,10 @@ if let Some(report) = lock.recover()? {
 | T-028 | `FL-FR-018`, `FL-FR-019` | A thread holds a `BufferedWriter` with one pending row; another thread tries to read the row through a `BufferedReader`. | `try_read` returns `None` and the reader gets nothing within 200 ms while the writer is alive; after release, the reader sees the flushed row. |
 | T-029 | `FL-FR-013`, `FL-FR-019` | Write two rows through a `BufferedWriter` built from the guard, drop it, then panic while still holding the guard. | The report has `before.element_count == 2` and `after.element_count == 4`. |
 | T-030 | `FL-FR-019` | Panic while a `BufferedWriter` built from the guard still has a pending row. | Unwinding flushes the row before the guard records `after`: the report shows 0 then 1 rows, and the row is readable after `recover`. |
+| T-031 | `FL-FR-020`, `FL-FR-021`, `FL-RS-008` | Call `Borrow::borrow` on a read guard and on a write guard, and `BorrowMut::borrow_mut` on a write guard to append a row; compare with `Deref`; drop the write guard. | `borrow()` and `borrow_mut()` point to the same `FileMetadata` as `Deref` (`std::ptr::eq`); the appended row is visible to a later read guard and `generation` is 1. |
+| T-032 | `FL-FR-020`, `FL-FR-022` | Build two `StructFile<Record, FileReadGuard<'_>>` views from two `read()` calls; read through both; check `try_write` while they live and after they are dropped. | Both views return the same records; `try_write` returns `None` while a view is alive and `Some` after both are dropped. |
+| T-033 | `FL-FR-021`, `FL-FR-022` | Build `StructFile<Record, FileWriteGuard<'_>>` from `write()`, append and insert records, call `into_inner` to get the guard back, check `element_count` through it, drop it, then read through a read-guard view. | The returned guard sees the new count; `generation` is 1 after it is dropped; the read view returns the records in order. |
+| T-034 | `FL-FR-013`, `FL-FR-022` | In a thread named `poisoner`, build a write view from a guard on a file with N rows, append two records, then panic while the view is alive. Call `recover`. | `recover` returns a report with `before.element_count == N` and `after.element_count == N + 2`; after `recover`, a read view sees N + 2 records. |
 
 #### Test location
 
@@ -487,41 +564,49 @@ if let Some(report) = lock.recover()? {
 | T-028 | `rust_serial_file/tests/file_lock.rs` | `buffered_writer_blocks_buffered_readers_until_released` |
 | T-029 | `rust_serial_file/tests/file_lock.rs` | `panic_with_buffered_writer_reports_flushed_rows` |
 | T-030 | `rust_serial_file/tests/file_lock.rs` | `panic_while_buffered_writer_alive_flushes_during_unwind` |
+| T-031 | `rust_serial_file/tests/file_lock.rs` | `guard_borrow_matches_deref` |
+| T-032 | `rust_serial_file/tests/file_lock.rs` | `struct_file_views_hold_read_guards` |
+| T-033 | `rust_serial_file/tests/file_lock.rs` | `struct_file_view_holds_write_guard_until_dropped` |
+| T-034 | `rust_serial_file/tests/file_lock.rs` | `panic_with_struct_file_write_view_poisons_and_reports` |
 
 #### Test results
 
 | Test ID | Date of run | Git hash | Status |
 |---|---|---|---|
-| T-001 | 2026-11-11 | `40dba55+dirty` | ✅ Success |
-| T-002 | 2026-11-11 | `40dba55+dirty` | ✅ Success |
-| T-003 | 2026-11-11 | `40dba55+dirty` | ✅ Success |
-| T-004 | 2026-11-11 | `40dba55+dirty` | ✅ Success |
-| T-005 | 2026-11-11 | `40dba55+dirty` | ✅ Success |
-| T-006 | 2026-11-11 | `40dba55+dirty` | ✅ Success |
-| T-007 | 2026-11-11 | `40dba55+dirty` | ✅ Success |
-| T-008 | 2026-11-11 | `40dba55+dirty` | ✅ Success |
-| T-009 | 2026-11-11 | `40dba55+dirty` | ✅ Success |
-| T-010 | 2026-11-11 | `40dba55+dirty` | ✅ Success |
-| T-011 | 2026-11-11 | `40dba55+dirty` | ✅ Success |
-| T-012 | 2026-11-11 | `40dba55+dirty` | ✅ Success |
-| T-013 | 2026-11-11 | `40dba55+dirty` | ✅ Success |
-| T-014 | 2026-11-11 | `40dba55+dirty` | ✅ Success |
-| T-015 | 2026-11-11 | `40dba55+dirty` | ✅ Success |
-| T-016 | 2026-11-11 | `40dba55+dirty` | ✅ Success |
-| T-017 | 2026-11-11 | `40dba55+dirty` | ✅ Success |
-| T-018 | 2026-11-11 | `40dba55+dirty` | ✅ Success |
-| T-019 | 2026-11-11 | `40dba55+dirty` | ✅ Success |
-| T-020 | 2026-11-11 | `40dba55+dirty` | ✅ Success |
-| T-021 | 2026-11-11 | `40dba55+dirty` | ✅ Success |
-| T-022 | 2026-11-11 | `40dba55+dirty` | ✅ Success |
-| T-023 | 2026-11-11 | `40dba55+dirty` | ✅ Success |
-| T-024 | 2026-11-11 | `40dba55+dirty` | ✅ Success |
-| T-025 | 2026-11-11 | `40dba55+dirty` | ✅ Success |
-| T-026 | 2026-11-11 | `40dba55+dirty` | ✅ Success |
-| T-027 | 2026-11-11 | `40dba55+dirty` | ✅ Success |
-| T-028 | 2026-11-11 | `40dba55+dirty` | ✅ Success |
-| T-029 | 2026-11-11 | `40dba55+dirty` | ✅ Success |
-| T-030 | 2026-11-11 | `40dba55+dirty` | ✅ Success |
+| T-001 | 2026-11-11 | `aa9eaf4+dirty` | ✅ Success |
+| T-002 | 2026-11-11 | `aa9eaf4+dirty` | ✅ Success |
+| T-003 | 2026-11-11 | `aa9eaf4+dirty` | ✅ Success |
+| T-004 | 2026-11-11 | `aa9eaf4+dirty` | ✅ Success |
+| T-005 | 2026-11-11 | `aa9eaf4+dirty` | ✅ Success |
+| T-006 | 2026-11-11 | `aa9eaf4+dirty` | ✅ Success |
+| T-007 | 2026-11-11 | `aa9eaf4+dirty` | ✅ Success |
+| T-008 | 2026-11-11 | `aa9eaf4+dirty` | ✅ Success |
+| T-009 | 2026-11-11 | `aa9eaf4+dirty` | ✅ Success |
+| T-010 | 2026-11-11 | `aa9eaf4+dirty` | ✅ Success |
+| T-011 | 2026-11-11 | `aa9eaf4+dirty` | ✅ Success |
+| T-012 | 2026-11-11 | `aa9eaf4+dirty` | ✅ Success |
+| T-013 | 2026-11-11 | `aa9eaf4+dirty` | ✅ Success |
+| T-014 | 2026-11-11 | `aa9eaf4+dirty` | ✅ Success |
+| T-015 | 2026-11-11 | `aa9eaf4+dirty` | ✅ Success |
+| T-016 | 2026-11-11 | `aa9eaf4+dirty` | ✅ Success |
+| T-017 | 2026-11-11 | `aa9eaf4+dirty` | ✅ Success |
+| T-018 | 2026-11-11 | `aa9eaf4+dirty` | ✅ Success |
+| T-019 | 2026-11-11 | `aa9eaf4+dirty` | ✅ Success |
+| T-020 | 2026-11-11 | `aa9eaf4+dirty` | ✅ Success |
+| T-021 | 2026-11-11 | `aa9eaf4+dirty` | ✅ Success |
+| T-022 | 2026-11-11 | `aa9eaf4+dirty` | ✅ Success |
+| T-023 | 2026-11-11 | `aa9eaf4+dirty` | ✅ Success |
+| T-024 | 2026-11-11 | `aa9eaf4+dirty` | ✅ Success |
+| T-025 | 2026-11-11 | `aa9eaf4+dirty` | ✅ Success |
+| T-026 | 2026-11-11 | `aa9eaf4+dirty` | ✅ Success |
+| T-027 | 2026-11-11 | `aa9eaf4+dirty` | ✅ Success |
+| T-028 | 2026-11-11 | `aa9eaf4+dirty` | ✅ Success |
+| T-029 | 2026-11-11 | `aa9eaf4+dirty` | ✅ Success |
+| T-030 | 2026-11-11 | `aa9eaf4+dirty` | ✅ Success |
+| T-031 | 2026-11-11 | `aa9eaf4+dirty` | ✅ Success |
+| T-032 | 2026-11-11 | `aa9eaf4+dirty` | ✅ Success |
+| T-033 | 2026-11-11 | `aa9eaf4+dirty` | ✅ Success |
+| T-034 | 2026-11-11 | `aa9eaf4+dirty` | ✅ Success |
 
 #### Notes
 
@@ -543,6 +628,17 @@ if let Some(report) = lock.recover()? {
 - T-024 to T-030 needed no change to `BufferedReader` or `BufferedWriter`:
   `&guard` and `&mut guard` coerce to `&FileMetadata` and
   `&mut FileMetadata`.
+- Revision 0.5 run (2026-11-11, `aa9eaf4+dirty`): `cargo test --test
+  file_lock` was run 10 times in a row; all 34 tests passed every time
+  (about 0.23 s per run). The full crate suite (`cargo test`, 179 tests with
+  doc tests) passes, as do `cargo fmt --check` and
+  `cargo clippy --all-targets` with no warnings. T-001 to T-030 passed with
+  no change to their code after P-007.
+- T-034 panics on purpose in the `poisoner` thread; its panic message is
+  expected.
+- The tests use a `Value { value: u32 }` record derived with
+  `SerializedStruct`, matching the 4-byte little-endian rows the other tests
+  write, so T-032 to T-034 read the rows written by `lock_with_rows`.
 
 #### Warning notes
 
@@ -562,33 +658,38 @@ if let Some(report) = lock.recover()? {
   remaining uncovered code. Do not reduce coverage by excluding relevant code
   from the measured scope.
 - **Coverage summary:** `src/file/file_lock.rs` has 100% function and line
-  coverage and 97.90% region coverage; see the table below.
+  coverage and 98.03% region coverage; see the table below. Revision 0.5
+  touched only this production file (plus the test file
+  `tests/file_lock.rs`, which is not reported). Before revision 0.5 it
+  measured 100.00% (18/18) functions, 100.00% (100/100) lines, and 97.90%
+  (140/143) regions; `src/file/mod.rs`, touched in revision 0.1, has no
+  executable code.
 
 ### Current coverage results
 
-- **Tool and command:** `cargo llvm-cov --package rust_serial_file --summary-only` (cargo-llvm-cov 0.9.1, stable toolchain)
+- **Tool and command:** `cargo-llvm-cov 0.9.1` with `llvm-tools-preview`, on
+  the stable toolchain, run from `rust_serial_file/`: `cargo llvm-cov clean`,
+  then `cargo llvm-cov --all-targets`, then
+  `cargo llvm-cov report --show-missing-lines`. Branch coverage is `N/A`:
+  `--branch` needs a nightly compiler.
 - **Date of run:** 2026-11-11
-- **Git hash:** `40dba55+dirty`
+- **Git hash:** `aa9eaf4+dirty`
 
 | File name | Function coverage | Line coverage | Region coverage | Branch coverage |
 |---|---|---|---|---|
-| `rust_serial_file/src/file/file_lock.rs` | 100.00% (18/18) | 100.00% (100/100) | 97.90% (140/143) | N/A |
-| `rust_serial_file/src/file/mod.rs` | N/A | N/A | N/A | N/A |
+| `rust_serial_file/src/file/file_lock.rs` | 100.00% (21/21) | 100.00% (109/109) | 98.03% (149/152) | N/A |
 
 ### Coverage notes
 
-- **`rust_serial_file/src/file/file_lock.rs`:** 3 regions are not covered,
-  all error paths of the write-guard snapshot: the `?` after
-  `metadata.file_len()` (line 59) and after `metadata.element_count()`
-  (line 60) in `FileSnapshot::capture`, and the `?` that passes that error up
-  in `FileWriteGuard::new` (line 289). They run only if `File::metadata()`
+- **`rust_serial_file/src/file/file_lock.rs`:** the three new `Borrow` /
+  `BorrowMut` functions are fully covered. The same 3 regions as before are
+  not covered, all error paths of the write-guard snapshot: the `?` after
+  `metadata.file_len()` (line 60) and after `metadata.element_count()`
+  (line 61) in `FileSnapshot::capture`, and the `?` that passes that error up
+  in `FileWriteGuard::new` (line 300). They run only if `File::metadata()`
   fails on a file that is already open, which cannot be triggered portably
   from a test without fault injection. No plan to cover them now; a
-  fault-injection seam in `FileMetadata` would be needed. Branch coverage is
-  `N/A` because it requires a nightly toolchain.
-- **`rust_serial_file/src/file/mod.rs`:** only module declarations (one
-  `pub mod file_lock;` line added), with no executable code, so the tool
-  reports no metrics.
+  fault-injection seam in `FileMetadata` would be needed.
 
 ## Out of scope
 
@@ -620,6 +721,13 @@ if let Some(report) = lock.recover()? {
 - Upgradable or downgradable guards (read to write, write to read).
 - Timeout-based acquisition (`read_timeout`, `write_timeout`).
 - A lock-aware `StructFile`, buffered reader, or buffered writer built on top
-  of `FileLock`; these will have their own requirement documents.
+  of `FileLock`; these will have their own requirement documents. Since
+  revision 0.5 a plain `StructFile` can hold a guard (`FL-FR-022`), which
+  covers the typed-view case without a lock-aware type.
+- Owned guards that do not borrow the `FileLock` (for example over
+  `Arc<FileLock>`), so a view can outlive a borrow of its lock or of a future
+  `FileAtlas`. Owner: the user, when the atlas is specified.
+- `Borrow` impls for `BufferedReader` or `BufferedWriter`: they already take
+  `&FileMetadata` / `&mut FileMetadata`, which a guard reborrow provides.
 - Async (`tokio`) locking.
 - Fairness or writer-priority guarantees beyond those of `std::sync::RwLock`.

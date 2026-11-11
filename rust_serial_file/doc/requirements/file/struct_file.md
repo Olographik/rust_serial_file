@@ -2,7 +2,7 @@
 
 - **Date:** 2026-11-11
 - **Author:** `Olographik`
-- **Revision:** 0.3
+- **Revision:** 0.4
 - **Short description:** Specify a typed, file-backed serial collection that is generic over how it holds its `FileMetadata` (owned or borrowed), with read-only and writable views.
 
 ## Table of contents
@@ -47,8 +47,9 @@ covers:
   (`StructWriteFile<'a, T>`);
 - any other `Borrow`/`BorrowMut` holder chosen by the caller, such as `Box`
   or `Arc`;
-- a reborrow of a `FileLock` guard (`&*guard` or `&mut *guard`) in a
-  multi-threaded application.
+- a `FileLock` guard (`FileReadGuard`, `FileWriteGuard`) in a multi-threaded
+  application, held directly by the view since `FileLock` revision 0.5, or
+  a reborrow of it (`&*guard`, `&mut *guard`).
 
 `StructFile` does not know about `FileLock`, its guards, or any locking. A
 single-threaded application uses owned or borrowed metadata and needs no
@@ -66,6 +67,7 @@ constructing the `FileMetadata`.
 |---|---|---|---|
 | 0.2 | 2026-11-11 | `Olographik` | Public API: `read_value_at`, `serial_get`, and `serial_iter` take `&self` instead of `&mut self`, following revision 0.2 of `doc/requirements/data_container/serial_read_container.md`. No requirement IDs changed. The rest of this document still follows the previous template. |
 | 0.3 | 2026-11-11 | `Olographik` | `StructFile` becomes generic over its storage `M` instead of owning a `FileMetadata`. Modified: `RSF-SF-FR-001` (generic storage), `RSF-SF-FR-003` (path constructor only for owned storage), `RSF-SF-FR-005` (reader requires `M: Borrow<FileMetadata>`), `RSF-SF-FR-006` and `RSF-SF-FR-007` (writer and container require `M: BorrowMut<FileMetadata>`), `RSF-SF-FR-011` (`into_inner` recovers the storage), `RSF-SF-RS-001` (generic type, no `Clone`), `RSF-SF-RS-002` (iterator borrows the view). Added: `RSF-SF-FR-014` (read-only view alias), `RSF-SF-FR-015` (writable view alias), `RSF-SF-FR-016` (`as_read_only`), `RSF-SF-DS-010` (length recomputed per view), `RSF-SF-RS-007` (storage bounds, no lock dependency), `RSF-SF-RS-008` (default storage parameter), `RSF-SF-RS-009` (`Send`/`Sync` follow `T` and `M`), `RSF-SF-RS-010` (consistent `borrow`). Document migrated to the current requirements template: Revision column, closing Coverage and Documentation phases, split test tables, and the coverage results table. Tests T-026 to T-031 added. |
+| 0.4 | 2026-11-11 | `Olographik` | Modified: `RSF-SF-RS-007` (lock guards can be held directly as storage, not only reborrowed). No behavior or code changed. `FileLock` revision 0.5 added `Borrow`/`BorrowMut<FileMetadata>` impls to its guards, so a view can now hold a guard directly. Updated Overview, Assumptions, the lock usage example, Safety, Compatibility, and Out of scope (the guard `Borrow` item is resolved). The `StructFile` type doc comment in `src/file/struct_file.rs` was reworded to match; no code changed. |
 
 ## Goals and scope
 
@@ -116,9 +118,8 @@ constructing the `FileMetadata`.
   and later the planned `FileAtlas`'s (OS file locks).
 - `M`'s `borrow` and `borrow_mut` implementations return the same
   `FileMetadata` on every call while the view exists. This holds for owned
-  values, references, `Box`, and `Arc`. Lock guards implement only
-  `Deref`/`DerefMut`, not `Borrow`, so they are used through a reborrow
-  (`&*guard` or `&mut *guard`), which is a plain reference.
+  values, references, `Box`, `Arc`, and the `FileLock` guards, whose
+  `Borrow` impls delegate to `Deref` (`FileLock` requirement `FL-RS-008`).
 - The component implements the existing `SerialDataReader<T>`,
   `SerialDataWriter<T>`, and `SerialDataContainer<T>` traits from the adapter
   module, with reads on `&self` as required by revision 0.2 of
@@ -180,7 +181,7 @@ constructing the `FileMetadata`.
 | `RSF-SF-RS-004` | Public index arguments use `usize`; conversions to `FileMetadata` row indices shall be checked and report overflow. | 0.1 |
 | `RSF-SF-RS-005` | File length shall be stored as instance-local collection state so `serial_len` does not need to perform fallible I/O. | 0.1 |
 | `RSF-SF-RS-006` | Row and shift buffers shall use fallible allocation where allocation is required; allocation failure shall be reported rather than converted to a panic or success. | 0.1 |
-| `RSF-SF-RS-007` | Read operations, constructors, and accessors shall require only `M: Borrow<FileMetadata>`. Write operations shall require `M: BorrowMut<FileMetadata>`. The struct definition shall not bound `M`. `src/file/struct_file.rs` shall not import or name `FileLock`, its guards, or any synchronization type; lock guards are used through a reborrow (`&*guard`, `&mut *guard`), which is a plain reference. | 0.3 |
+| `RSF-SF-RS-007` | Read operations, constructors, and accessors shall require only `M: Borrow<FileMetadata>`. Write operations shall require `M: BorrowMut<FileMetadata>`. The struct definition shall not bound `M`. `src/file/struct_file.rs` shall not import or name `FileLock`, its guards, or any synchronization type; lock guards work as storage only because they implement `Borrow`/`BorrowMut<FileMetadata>`, or through a reborrow (`&*guard`, `&mut *guard`). | 0.4 |
 | `RSF-SF-RS-008` | The storage parameter shall be declared last with the default `M = FileMetadata`, so `StructFile<T>` keeps naming the owned type of revision 0.2. | 0.3 |
 | `RSF-SF-RS-009` | `Send` and `Sync` shall be derived automatically from `T` and `M`; no manual `unsafe impl` shall be written. The type documentation shall state that `StructFile<T, M>` is `Send`/`Sync` when `T` and `M` are, and that `&FileMetadata` and `&mut FileMetadata` views are `Send` and `Sync` because `FileMetadata` is. | 0.3 |
 | `RSF-SF-RS-010` | The documentation shall state that `M`'s `borrow`/`borrow_mut` must return the same `FileMetadata` for the view's whole lifetime. If a custom `M` breaks this, results may be wrong (for example a stale length), but the component shall stay memory-safe and still report out-of-range rows as errors through `FileMetadata`'s range checks. | 0.3 |
@@ -244,8 +245,11 @@ With a lock (multi-threaded), chosen by the caller and unknown to
 `StructFile`:
 
 ```rust
+// The view holds the guard, so the read lock lasts as long as `reader`.
+let reader = StructFile::<Record, _>::new(file_lock.read()?)?;
+// Or keep the guard separately and borrow from it.
 let guard = file_lock.read()?;
-let reader = StructReadOnlyFile::<Record>::new(&*guard)?;
+let borrowed = StructReadOnlyFile::<Record>::new(&*guard)?;
 ```
 
 `StructFileIter` is the associated owned-row iterator type. The reader
@@ -332,7 +336,7 @@ written prefix remain unchanged. An empty slice performs no writes.
   released; secure zeroization is not required.
 - `StructFile` does not synchronize access through other handles or
   processes, and has no locking of its own. In-process sharing across threads
-  is the caller's choice of `M` (for example a reborrowed lock guard). OS-level locking
+  is the caller's choice of `M` (for example a lock guard). OS-level locking
   is deferred to the planned `FileAtlas`.
 
 ## Compatibility
@@ -360,10 +364,10 @@ written prefix remain unchanged. An empty slice performs no writes.
 - Existing files opened with the matching row width and data offset require
   no migration. A row-width mismatch shall be rejected rather than
   reinterpreted.
-- `FileLock` and its guards need no change. They implement `Deref`/`DerefMut`
-  but not `Borrow`, so a caller builds a view from a reborrow of the guard
-  (`&*guard` or `&mut *guard`). Adding `Borrow` impls to the guards, so a
-  view can hold its guard directly, is deferred (see [Out of scope](#out-of-scope)).
+- `FileLock` guards implement `Borrow`/`BorrowMut<FileMetadata>` since
+  `FileLock` revision 0.5, so `StructFile<T, FileReadGuard<'_>>` and
+  `StructFile<T, FileWriteGuard<'_>>` work with no change to this component.
+  Building a view from a reborrow (`&*guard`, `&mut *guard`) keeps working.
 
 ## Performance and resource use
 
@@ -697,12 +701,6 @@ the revision 0.2 change. Revision 0.3 adds P-007 to P-009, so Coverage is
 - Views that outlive a borrow of their lock (owned guards over
   `Arc<FileLock>`). This belongs to `FileLock` or `FileAtlas`, not here.
   Owner: the user, when the atlas is specified.
-- `impl Borrow<FileMetadata>` for `FileReadGuard` and
-  `impl Borrow<FileMetadata> + BorrowMut<FileMetadata>` for `FileWriteGuard`,
-  so a view can hold its guard directly (`StructFile<T, FileReadGuard<'_>>`)
-  instead of a reborrow. This is an additive change to `file_lock.rs` and its
-  requirements document. Owner: the user, likely when the atlas is
-  specified.
 - Implementing `Clone` or `Copy` for read-only views. It would be safe for
   `&FileMetadata` storage but is not needed yet; `as_read_only` covers the
   known use. Owner: the user, if a use appears.

@@ -1,4 +1,5 @@
 use std::{
+    borrow::{Borrow, BorrowMut},
     collections::HashSet,
     fs,
     panic::{self, AssertUnwindSafe},
@@ -8,12 +9,17 @@ use std::{
     time::Duration,
 };
 
+use rust_serial_file::adapter::{
+    abstract_serial_read::SerialDataReader, abstract_serial_write::SerialDataWriter,
+};
 use rust_serial_file::file::{
     buffered_reader::BufferedReader,
     buffered_writer::BufferedWriter,
-    file_lock::{FileLock, FileSnapshot},
+    file_lock::{FileLock, FileReadGuard, FileSnapshot, FileWriteGuard},
     file_metadata::FileMetadata,
+    struct_file::StructFile,
 };
+use rust_serial_file::serialized_struct;
 use tempfile::{TempDir, tempdir};
 
 const ROW_SIZE: u64 = 4;
@@ -640,4 +646,115 @@ fn panic_while_buffered_writer_alive_flushes_during_unwind() {
     assert_eq!(report.before.element_count, 0);
     assert_eq!(report.after.map(|after| after.element_count), Some(1));
     assert_eq!(read_value(&lock.read().unwrap(), 0), 9);
+}
+
+/// Typed record matching the 4-byte little-endian rows used in this file.
+#[derive(serialized_struct_derive::SerializedStruct, Debug, PartialEq, PartialOrd)]
+struct Value {
+    value: u32,
+}
+
+fn value(value: u32) -> Value {
+    Value { value }
+}
+
+fn read_values<V: SerialDataReader<Value>>(view: &V) -> Vec<u32> {
+    view.serial_iter()
+        .unwrap()
+        .map(|record| record.unwrap().value)
+        .collect()
+}
+
+// T-031
+#[test]
+fn guard_borrow_matches_deref() {
+    let (_directory, lock) = lock_with_rows(2);
+
+    {
+        let guard = lock.read().unwrap();
+        let borrowed: &FileMetadata = guard.borrow();
+        assert!(std::ptr::eq(borrowed, &*guard));
+    }
+    {
+        let mut guard = lock.write().unwrap();
+        let borrowed: &FileMetadata = guard.borrow();
+        assert!(std::ptr::eq(borrowed, &*guard));
+        let deref_ptr: *const FileMetadata = &*guard;
+        let borrowed_mut: &mut FileMetadata = guard.borrow_mut();
+        assert!(std::ptr::eq(borrowed_mut, deref_ptr));
+        borrowed_mut.append_row(&row(7)).unwrap();
+    }
+
+    let guard = lock.read().unwrap();
+    assert_eq!(guard.element_count().unwrap(), 3);
+    assert_eq!(read_value(&guard, 2), 7);
+    assert_eq!(lock.generation(), 1);
+}
+
+// T-032
+#[test]
+fn struct_file_views_hold_read_guards() {
+    let (_directory, lock) = lock_with_rows(3);
+
+    {
+        let first = StructFile::<Value, _>::new(lock.read().unwrap()).unwrap();
+        let second = StructFile::<Value, FileReadGuard<'_>>::new(lock.read().unwrap()).unwrap();
+        assert_eq!(read_values(&first), [0, 1, 2]);
+        assert_eq!(second.serial_get(1).unwrap(), value(1));
+        assert!(lock.try_write().unwrap().is_none());
+
+        drop(first);
+        assert!(lock.try_write().unwrap().is_none());
+    }
+
+    assert!(lock.try_write().unwrap().is_some());
+}
+
+// T-033
+#[test]
+fn struct_file_view_holds_write_guard_until_dropped() {
+    let (_directory, lock) = lock_with_rows(2);
+
+    let mut writer = StructFile::<Value, FileWriteGuard<'_>>::new(lock.write().unwrap()).unwrap();
+    writer.serial_write(value(5)).unwrap();
+    writer.serial_insert(1, value(9)).unwrap();
+    assert!(lock.try_read().unwrap().is_none());
+
+    let guard = writer.into_inner();
+    assert_eq!(guard.element_count().unwrap(), 4);
+    assert_eq!(lock.generation(), 0);
+    drop(guard);
+    assert_eq!(lock.generation(), 1);
+
+    let reader = StructFile::<Value, _>::new(lock.read().unwrap()).unwrap();
+    assert_eq!(read_values(&reader), [0, 9, 1, 5]);
+}
+
+// T-034
+#[test]
+fn panic_with_struct_file_write_view_poisons_and_reports() {
+    let (_directory, lock) = lock_with_rows(3);
+    let lock = Arc::new(lock);
+
+    let poisoner = Arc::clone(&lock);
+    let result = thread::Builder::new()
+        .name(POISONER.to_owned())
+        .spawn(move || {
+            let mut writer = StructFile::<Value, _>::new(poisoner.write().unwrap()).unwrap();
+            writer.serial_write(value(10)).unwrap();
+            writer.serial_write(value(11)).unwrap();
+            panic!("intentional panic while a write view holds the guard");
+        })
+        .unwrap()
+        .join();
+    assert!(result.is_err());
+
+    assert_poisoned(lock.read());
+    let report = lock.recover().unwrap().unwrap();
+    assert_eq!(report.before.element_count, 3);
+    assert_eq!(report.after.unwrap().element_count, 5);
+    assert_eq!(report.thread_name.as_deref(), Some(POISONER));
+
+    let reader = StructFile::<Value, _>::new(lock.read().unwrap()).unwrap();
+    assert_eq!(read_values(&reader), [0, 1, 2, 10, 11]);
 }

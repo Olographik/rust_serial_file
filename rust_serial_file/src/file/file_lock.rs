@@ -26,6 +26,7 @@
 //! file from disk.
 
 use std::{
+    borrow::{Borrow, BorrowMut},
     ops::{Deref, DerefMut},
     path::Path,
     sync::{
@@ -270,6 +271,16 @@ impl Deref for FileReadGuard<'_> {
     }
 }
 
+/// Lets the guard be used wherever a `Borrow<FileMetadata>` holder is
+/// expected, for example as the storage of a typed read-only view, which then
+/// keeps the read lock for its whole lifetime. Returns the same metadata as
+/// [`Deref`].
+impl Borrow<FileMetadata> for FileReadGuard<'_> {
+    fn borrow(&self) -> &FileMetadata {
+        self
+    }
+}
+
 /// Exclusive borrow of the [`FileMetadata`] owned by a [`FileLock`].
 ///
 /// The write lock is released when the guard is dropped. If it is dropped by
@@ -307,6 +318,24 @@ impl Deref for FileWriteGuard<'_> {
 impl DerefMut for FileWriteGuard<'_> {
     fn deref_mut(&mut self) -> &mut FileMetadata {
         &mut self.guard.metadata
+    }
+}
+
+/// Lets the guard be used wherever a `Borrow<FileMetadata>` holder is
+/// expected, for example as the storage of a typed view, which then keeps the
+/// write lock for its whole lifetime. Returns the same metadata as [`Deref`].
+impl Borrow<FileMetadata> for FileWriteGuard<'_> {
+    fn borrow(&self) -> &FileMetadata {
+        self
+    }
+}
+
+/// Mutable counterpart of the [`Borrow`] impl, for writable typed views.
+/// Returns the same metadata as [`DerefMut`]; dropping the guard afterwards
+/// updates the generation counter or stores a [`PoisonReport`] as usual.
+impl BorrowMut<FileMetadata> for FileWriteGuard<'_> {
+    fn borrow_mut(&mut self) -> &mut FileMetadata {
+        self
     }
 }
 

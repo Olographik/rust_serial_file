@@ -26,11 +26,12 @@ const STACK_ROW_BUFFER_BYTES: usize = 1024;
 /// [`FileMetadata`]; it can also be a borrow such as `&FileMetadata` (see
 /// [`StructReadOnlyFile`]) or `&mut FileMetadata` (see [`StructWriteFile`]),
 /// or any other holder that implements [`Borrow<FileMetadata>`], such as
-/// `Box<FileMetadata>` or `Arc<FileMetadata>`. Reading needs
-/// `M: Borrow<FileMetadata>`; writing needs `M: BorrowMut<FileMetadata>`.
-/// A holder that only dereferences to a `FileMetadata`, such as a lock guard,
-/// is used through a reborrow: `StructFile::new(&*guard)` or
-/// `StructFile::new(&mut *guard)`.
+/// `Box<FileMetadata>`, `Arc<FileMetadata>`, or a guard of a lock that
+/// implements `Borrow`, in which case the view keeps the lock while it
+/// lives. Reading needs `M: Borrow<FileMetadata>`; writing needs
+/// `M: BorrowMut<FileMetadata>`. A holder that only dereferences to a
+/// `FileMetadata` is used through a reborrow: `StructFile::new(&*holder)` or
+/// `StructFile::new(&mut *holder)`.
 ///
 /// `M`'s `borrow` and `borrow_mut` must return the same `FileMetadata` for
 /// the whole life of the collection. A holder that breaks this can make
