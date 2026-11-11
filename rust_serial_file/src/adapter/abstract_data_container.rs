@@ -89,7 +89,7 @@ pub trait SerialDataContainerMut<T>: SerialDataContainer<T> {
     fn serial_get_mut(&mut self, index: usize) -> Result<&mut T>;
 }
 
-fn find_insert_position<C, T, K>(container: &mut C, key: &K) -> Result<(usize, bool)>
+fn find_insert_position<C, T, K>(container: &C, key: &K) -> Result<(usize, bool)>
 where
     C: SerialDataReader<T> + ?Sized,
     T: PartialOrd<K>,
@@ -131,7 +131,7 @@ impl<T: Clone> SerialDataContainerMut<T> for Vec<T> {
 
 #[cfg(test)]
 mod tests {
-    use std::cmp::Ordering;
+    use std::{cell::Cell, cmp::Ordering};
 
     use anyhow::{Result, anyhow};
 
@@ -243,7 +243,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(values.records, [10, 20, 30]);
-        assert_eq!(values.read_count, 2);
+        assert_eq!(values.read_count.get(), 2);
     }
 
     #[test]
@@ -404,7 +404,7 @@ mod tests {
             self.records.len()
         }
 
-        fn serial_get(&mut self, index: usize) -> Result<NonCloneRecord> {
+        fn serial_get(&self, index: usize) -> Result<NonCloneRecord> {
             self.records.get(index).copied().map(NonCloneRecord).ok_or(
                 SerialDataReaderError::IndexOutOfBounds {
                     index,
@@ -414,7 +414,7 @@ mod tests {
             )
         }
 
-        fn serial_iter(&mut self) -> Result<Self::Iter<'_>> {
+        fn serial_iter(&self) -> Result<Self::Iter<'_>> {
             Ok(self.records.iter().map(decode_non_clone_record))
         }
     }
@@ -537,7 +537,7 @@ mod tests {
         records: Vec<i32>,
         fail_read_at: Option<usize>,
         fail_write: bool,
-        read_count: usize,
+        read_count: Cell<usize>,
     }
 
     fn clone_record(record: &i32) -> Result<i32> {
@@ -554,8 +554,8 @@ mod tests {
             self.records.len()
         }
 
-        fn serial_get(&mut self, index: usize) -> Result<i32> {
-            self.read_count += 1;
+        fn serial_get(&self, index: usize) -> Result<i32> {
+            self.read_count.set(self.read_count.get() + 1);
             if self.fail_read_at == Some(index) {
                 return Err(anyhow!("simulated read failure"));
             }
@@ -568,7 +568,7 @@ mod tests {
             })
         }
 
-        fn serial_iter(&mut self) -> Result<Self::Iter<'_>> {
+        fn serial_iter(&self) -> Result<Self::Iter<'_>> {
             Ok(self.records.iter().map(clone_record))
         }
     }
@@ -640,7 +640,7 @@ mod tests {
             records,
             fail_read_at: None,
             fail_write: false,
-            read_count: 0,
+            read_count: Cell::new(0),
         }
     }
 
@@ -758,6 +758,6 @@ mod tests {
                 .is_err()
         );
         assert_eq!(missing_key_write_failure.records, [10, 30]);
-        assert_eq!(missing_key_write_failure.read_count, 2);
+        assert_eq!(missing_key_write_failure.read_count.get(), 2);
     }
 }

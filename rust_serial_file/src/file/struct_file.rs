@@ -65,7 +65,7 @@ impl<T: SerializedStruct> StructFile<T> {
     }
 
     /// Reads and decodes the record at `index`.
-    pub fn read_value_at(&mut self, index: usize) -> Result<T> {
+    pub fn read_value_at(&self, index: usize) -> Result<T> {
         self.validate_existing_index(index)?;
         let file_index = to_file_index(index)?;
         if T::SIZE <= STACK_ROW_BUFFER_BYTES {
@@ -167,6 +167,13 @@ impl<T: SerializedStruct> StructFile<T> {
     }
 }
 
+/// Reads records through `&self`.
+///
+/// Rows are read with positioned reads on the owned file, so reads keep no
+/// mutable state in the collection: indexed reads and searches may run while
+/// an iterator is alive, and each iterator owns its own [`BufferedReader`].
+/// `StructFile<T>` is `Send` and `Sync` whenever `T` is; shared reads from
+/// several threads are safe because writes require `&mut self`.
 impl<T: SerializedStruct> SerialDataReader<T> for StructFile<T> {
     type Iter<'a>
         = StructFileIter<'a, T>
@@ -178,11 +185,11 @@ impl<T: SerializedStruct> SerialDataReader<T> for StructFile<T> {
         self.len
     }
 
-    fn serial_get(&mut self, index: usize) -> Result<T> {
+    fn serial_get(&self, index: usize) -> Result<T> {
         self.read_value_at(index)
     }
 
-    fn serial_iter(&mut self) -> Result<Self::Iter<'_>> {
+    fn serial_iter(&self) -> Result<Self::Iter<'_>> {
         Ok(StructFileIter {
             reader: BufferedReader::new(&self.metadata)?,
             next_index: 0,

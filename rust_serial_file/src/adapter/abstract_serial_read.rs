@@ -30,10 +30,23 @@ impl Error for SerialDataReaderError {}
 
 /// Reads owned records from a logically ordered serial collection.
 ///
+/// Every read operation takes `&self`, so a reader can be used through a
+/// shared reference and several reads may be in progress at once, for
+/// example a live iterator while [`serial_get`](Self::serial_get) is called.
+///
 /// Implementations may update internal state while reading, for example by
-/// refilling a file buffer or advancing a cursor. Those updates must not alter
-/// the logical records or their order. Operations that access backend data
-/// return [`anyhow::Result`] so storage and decoding errors remain observable.
+/// refilling a file buffer, reusing a cached prepared statement, or advancing
+/// a cursor. Such state must be held behind interior mutability (`Cell` or
+/// `RefCell` for single-threaded readers, `Mutex` or `RwLock` for readers that
+/// must be `Sync`) or obtained from a backend API that already accepts a
+/// shared reference. Interior borrows must be scoped to one operation or
+/// iterator step: an overlapping read must either succeed or return an
+/// `Err`, never panic or deadlock. State updates must not alter the logical
+/// records or their order. Operations that access backend data return
+/// [`anyhow::Result`] so storage and decoding errors remain observable.
+///
+/// The trait does not require `Send` or `Sync`; each implementation documents
+/// its own thread-safety.
 ///
 /// Searches use binary search and therefore require records to be ordered
 /// according to the comparison used by the search. They do not sort or mutate
@@ -63,13 +76,13 @@ pub trait SerialDataReader<T> {
     ///
     /// Returns an error if the index is out of bounds or if the backend cannot
     /// read or decode the record.
-    fn serial_get(&mut self, index: usize) -> Result<T>;
+    fn serial_get(&self, index: usize) -> Result<T>;
 
     /// Reads the first record.
     ///
     /// Returns [`SerialDataReaderError::EmptyCollection`] when the collection
     /// is empty, or propagates a backend read error.
-    fn serial_first(&mut self) -> Result<T> {
+    fn serial_first(&self) -> Result<T> {
         if self.serial_is_empty() {
             return Err(SerialDataReaderError::EmptyCollection.into());
         }
@@ -80,7 +93,7 @@ pub trait SerialDataReader<T> {
     ///
     /// Returns [`SerialDataReaderError::EmptyCollection`] when the collection
     /// is empty, or propagates a backend read error.
-    fn serial_last(&mut self) -> Result<T> {
+    fn serial_last(&self) -> Result<T> {
         let len = self.serial_len();
         if len == 0 {
             return Err(SerialDataReaderError::EmptyCollection.into());
@@ -93,14 +106,14 @@ pub trait SerialDataReader<T> {
     ///
     /// Iterator creation may fail, and failures encountered during iteration
     /// are yielded as `Err` items.
-    fn serial_iter(&mut self) -> Result<Self::Iter<'_>>;
+    fn serial_iter(&self) -> Result<Self::Iter<'_>>;
 
     /// Finds a value using its `PartialOrd` ordering.
     ///
     /// Returns the index of a matching record, or `None` if no record matches.
     /// Returns an error if a read fails or a comparison has no defined
     /// ordering.
-    fn serial_find(&mut self, value: &T) -> Result<Option<usize>>
+    fn serial_find(&self, value: &T) -> Result<Option<usize>>
     where
         T: PartialOrd<T>,
     {
@@ -113,7 +126,7 @@ pub trait SerialDataReader<T> {
     /// The collection must be ordered according to this comparison. Returns
     /// the matching index, `None` if no record matches, or an error if a read
     /// fails or the comparison has no defined ordering.
-    fn serial_find_by<K>(&mut self, key: &K) -> Result<Option<usize>>
+    fn serial_find_by<K>(&self, key: &K) -> Result<Option<usize>>
     where
         T: PartialOrd<K>,
     {
@@ -134,7 +147,7 @@ pub trait SerialDataReader<T> {
     /// after it). Records must be ordered consistently with that comparison.
     /// Returns the matching index, `None` if no record matches, or a backend
     /// read error.
-    fn serial_find_by_ordering<F>(&mut self, mut comparator: F) -> Result<Option<usize>>
+    fn serial_find_by_ordering<F>(&self, mut comparator: F) -> Result<Option<usize>>
     where
         F: FnMut(&T) -> Ordering,
     {
@@ -153,7 +166,7 @@ pub trait SerialDataReader<T> {
     /// matches, or an error if a read fails or a comparison has no defined
     /// ordering.
     fn serial_find_with_context(
-        &mut self,
+        &self,
         value: &T,
         context: &mut SearchContext,
     ) -> Result<Option<usize>>
@@ -171,7 +184,7 @@ pub trait SerialDataReader<T> {
     /// matches, or an error if a read fails or a comparison has no defined
     /// ordering.
     fn serial_find_by_with_context<K>(
-        &mut self,
+        &self,
         key: &K,
         context: &mut SearchContext,
     ) -> Result<Option<usize>>
@@ -196,7 +209,7 @@ pub trait SerialDataReader<T> {
     /// with the comparator. Returns the matching index, `None` if no record
     /// matches, or a backend read error.
     fn serial_find_by_ordering_with_context<F>(
-        &mut self,
+        &self,
         mut comparator: F,
         context: &mut SearchContext,
     ) -> Result<Option<usize>>
@@ -216,7 +229,7 @@ pub trait SerialDataReader<T> {
     /// Returns `Ok(Some(record))` when a matching record is found,
     /// `Ok(None)` when there is no match, or `Err` if searching or reading the
     /// record fails.
-    fn serial_find_and_get(&mut self, value: &T) -> Result<Option<T>>
+    fn serial_find_and_get(&self, value: &T) -> Result<Option<T>>
     where
         T: PartialOrd<T>,
     {
@@ -230,7 +243,7 @@ pub trait SerialDataReader<T> {
     /// Returns `Ok(Some(record))` when a matching record is found,
     /// `Ok(None)` when there is no match, or `Err` if searching or reading the
     /// record fails.
-    fn serial_find_by_and_get<K>(&mut self, key: &K) -> Result<Option<T>>
+    fn serial_find_by_and_get<K>(&self, key: &K) -> Result<Option<T>>
     where
         T: PartialOrd<K>,
     {
@@ -303,6 +316,10 @@ fn clone_to_result<T: Clone>(value: &T) -> Result<T> {
     Ok(value.clone())
 }
 
+/// Reads owned clones of the vector's elements.
+///
+/// Reads keep no internal state. `Vec<T>` is `Send` and `Sync` whenever `T`
+/// is.
 impl<T: Clone> SerialDataReader<T> for Vec<T> {
     type Iter<'a>
         = std::iter::Map<std::slice::Iter<'a, T>, fn(&'a T) -> Result<T>>
@@ -313,7 +330,7 @@ impl<T: Clone> SerialDataReader<T> for Vec<T> {
         Vec::len(self)
     }
 
-    fn serial_get(&mut self, index: usize) -> Result<T> {
+    fn serial_get(&self, index: usize) -> Result<T> {
         self.as_slice().get(index).cloned().ok_or_else(|| {
             SerialDataReaderError::IndexOutOfBounds {
                 index,
@@ -323,25 +340,38 @@ impl<T: Clone> SerialDataReader<T> for Vec<T> {
         })
     }
 
-    fn serial_iter(&mut self) -> Result<Self::Iter<'_>> {
+    fn serial_iter(&self) -> Result<Self::Iter<'_>> {
         Ok(self.iter().map(clone_to_result::<T>))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{cmp::Ordering, collections::BTreeMap, error::Error};
+    use std::{
+        cell::{Cell, RefCell},
+        cmp::Ordering,
+        collections::BTreeMap,
+        error::Error,
+    };
 
     use super::{SerialDataReader, SerialDataReaderError};
     use anyhow::{Result, anyhow};
     use utils::search::search_type::SearchContext;
 
+    /// Read buffer of the stateful test double, refilled on cache misses.
+    struct ReadBuffer {
+        start: usize,
+        records: Vec<i32>,
+    }
+
+    /// Stateful reader double whose buffer and read counter are updated
+    /// through interior mutability, as `&self` reads require.
     struct BufferedReader {
         records: Vec<i32>,
-        buffer: Vec<i32>,
-        buffer_start: usize,
+        buffer: RefCell<ReadBuffer>,
         buffer_capacity: usize,
-        read_count: usize,
+        read_count: Cell<usize>,
+        refill_count: Cell<usize>,
         fail_read_at: Option<usize>,
         fail_read_on_call: Option<usize>,
         fail_iterator_creation: bool,
@@ -352,20 +382,27 @@ mod tests {
         fn new(records: Vec<i32>, buffer_capacity: usize) -> Self {
             Self {
                 records,
-                buffer: Vec::new(),
-                buffer_start: 0,
+                buffer: RefCell::new(ReadBuffer {
+                    start: 0,
+                    records: Vec::new(),
+                }),
                 buffer_capacity,
-                read_count: 0,
+                read_count: Cell::new(0),
+                refill_count: Cell::new(0),
                 fail_read_at: None,
                 fail_read_on_call: None,
                 fail_iterator_creation: false,
                 iterator_error_at: None,
             }
         }
+
+        fn buffer_start(&self) -> usize {
+            self.buffer.borrow().start
+        }
     }
 
     struct BufferedIter<'a> {
-        reader: &'a mut BufferedReader,
+        reader: &'a BufferedReader,
         index: usize,
         len: usize,
     }
@@ -394,9 +431,9 @@ mod tests {
             self.records.len()
         }
 
-        fn serial_get(&mut self, index: usize) -> Result<i32> {
-            let read_number = self.read_count;
-            self.read_count += 1;
+        fn serial_get(&self, index: usize) -> Result<i32> {
+            let read_number = self.read_count.get();
+            self.read_count.set(read_number + 1);
             if self.fail_read_at == Some(index) {
                 return Err(anyhow!("injected read error at index {index}"));
             }
@@ -412,17 +449,25 @@ mod tests {
                 .into());
             }
 
-            let buffer_end = self.buffer_start + self.buffer.len();
-            if index < self.buffer_start || index >= buffer_end {
-                self.buffer_start = (index / self.buffer_capacity) * self.buffer_capacity;
-                let end = (self.buffer_start + self.buffer_capacity).min(self.records.len());
-                self.buffer = self.records[self.buffer_start..end].to_vec();
+            // The borrow is scoped to this call so overlapping reads, such as
+            // a live iterator, never observe an outstanding borrow.
+            let mut buffer = self
+                .buffer
+                .try_borrow_mut()
+                .map_err(|_| anyhow!("read buffer is already borrowed"))?;
+            let buffer_end = buffer.start + buffer.records.len();
+            if index < buffer.start || index >= buffer_end {
+                let start = (index / self.buffer_capacity) * self.buffer_capacity;
+                let end = (start + self.buffer_capacity).min(self.records.len());
+                buffer.start = start;
+                buffer.records = self.records[start..end].to_vec();
+                self.refill_count.set(self.refill_count.get() + 1);
             }
 
-            Ok(self.buffer[index - self.buffer_start])
+            Ok(buffer.records[index - buffer.start])
         }
 
-        fn serial_iter(&mut self) -> Result<Self::Iter<'_>> {
+        fn serial_iter(&self) -> Result<Self::Iter<'_>> {
             if self.fail_iterator_creation {
                 return Err(anyhow!("injected iterator creation error"));
             }
@@ -460,7 +505,7 @@ mod tests {
             self.records.len()
         }
 
-        fn serial_get(&mut self, index: usize) -> Result<i32> {
+        fn serial_get(&self, index: usize) -> Result<i32> {
             self.records.get(&index).copied().ok_or_else(|| {
                 SerialDataReaderError::IndexOutOfBounds {
                     index,
@@ -470,7 +515,7 @@ mod tests {
             })
         }
 
-        fn serial_iter(&mut self) -> Result<Self::Iter<'_>> {
+        fn serial_iter(&self) -> Result<Self::Iter<'_>> {
             if self.fail_iterator_creation {
                 return Err(anyhow!("injected map iterator creation error"));
             }
@@ -480,13 +525,13 @@ mod tests {
         }
     }
 
-    fn read_all<R: SerialDataReader<i32>>(reader: &mut R) -> Result<Vec<i32>> {
+    fn read_all<R: SerialDataReader<i32>>(reader: &R) -> Result<Vec<i32>> {
         reader.serial_iter()?.collect()
     }
 
     #[test]
     fn vector_reader_returns_owned_records_and_reports_invalid_indices() {
-        let mut values = vec![10, 20, 30];
+        let values = vec![10, 20, 30];
 
         assert_eq!(values.serial_len(), 3);
         assert!(!values.serial_is_empty());
@@ -509,7 +554,7 @@ mod tests {
             [10, 20, 30]
         );
 
-        let mut empty: Vec<i32> = Vec::new();
+        let empty: Vec<i32> = Vec::new();
         assert!(empty.serial_is_empty());
         assert_eq!(
             empty
@@ -583,7 +628,7 @@ mod tests {
             }
         }
 
-        let mut entries = vec![
+        let entries = vec![
             Entry {
                 key: 10,
                 value: "ten",
@@ -676,7 +721,7 @@ mod tests {
 
     #[test]
     fn searches_cover_empty_boundaries_context_seeds_and_inconsistent_comparators() {
-        let mut empty: Vec<i32> = Vec::new();
+        let empty: Vec<i32> = Vec::new();
         let mut context = SearchContext::none();
         assert_eq!(
             empty
@@ -691,7 +736,7 @@ mod tests {
                 .unwrap(),
             None
         );
-        let mut non_empty = vec![10, 20, 30];
+        let non_empty = vec![10, 20, 30];
         let mut context = SearchContext::none();
         assert_eq!(
             non_empty
@@ -700,7 +745,7 @@ mod tests {
             Some(0)
         );
 
-        let mut values = vec![10, 20, 30];
+        let values = vec![10, 20, 30];
         assert_eq!(values.serial_find_by(&5).unwrap(), None);
         assert_eq!(values.serial_find_by(&40).unwrap(), None);
 
@@ -847,7 +892,7 @@ mod tests {
         reader.fail_read_at = None;
         assert_eq!(reader.serial_find_by_and_get(&20).unwrap(), Some(20));
 
-        let mut unordered = vec![1.0_f64, f64::NAN, 3.0];
+        let unordered = vec![1.0_f64, f64::NAN, 3.0];
         let mut context = SearchContext::none();
         assert_eq!(
             unordered
@@ -860,14 +905,14 @@ mod tests {
 
     #[test]
     fn undefined_partial_ordering_is_reported() {
-        let mut values = vec![1.0_f64, f64::NAN, 3.0];
+        let values = vec![1.0_f64, f64::NAN, 3.0];
         let error = values.serial_find_by(&2.0).unwrap_err();
         assert_eq!(
             error.downcast_ref::<SerialDataReaderError>(),
             Some(&SerialDataReaderError::UndefinedOrdering)
         );
 
-        let mut ordered = vec![1.0_f64, 2.0, 3.0];
+        let ordered = vec![1.0_f64, 2.0, 3.0];
         assert_eq!(ordered.serial_find_by(&2.0).unwrap(), Some(1));
         assert_eq!(ordered.serial_find_by(&0.0).unwrap(), None);
         assert_eq!(ordered.serial_find_by(&4.0).unwrap(), None);
@@ -884,14 +929,14 @@ mod tests {
 
     #[test]
     fn buffered_reads_preserve_records_across_refills_and_iteration() {
-        let mut reader = BufferedReader::new(vec![10, 20, 30, 40, 50], 2);
+        let reader = BufferedReader::new(vec![10, 20, 30, 40, 50], 2);
 
         assert_eq!(reader.serial_get(3).unwrap(), 40);
-        assert_eq!(reader.buffer_start, 2);
+        assert_eq!(reader.buffer_start(), 2);
         assert_eq!(reader.serial_get(0).unwrap(), 10);
-        assert_eq!(reader.buffer_start, 0);
+        assert_eq!(reader.buffer_start(), 0);
         assert_eq!(reader.serial_get(4).unwrap(), 50);
-        assert_eq!(reader.buffer_start, 4);
+        assert_eq!(reader.buffer_start(), 4);
         assert_eq!(reader.serial_get(3).unwrap(), 40);
 
         let values = reader
@@ -900,12 +945,12 @@ mod tests {
             .collect::<Result<Vec<_>>>()
             .unwrap();
         assert_eq!(values, [10, 20, 30, 40, 50]);
-        assert_eq!(read_all(&mut reader).unwrap(), [10, 20, 30, 40, 50]);
+        assert_eq!(read_all(&reader).unwrap(), [10, 20, 30, 40, 50]);
     }
 
     #[test]
     fn backend_read_and_iterator_errors_remain_observable() {
-        let mut empty_reader = BufferedReader::new(Vec::new(), 2);
+        let empty_reader = BufferedReader::new(Vec::new(), 2);
         assert_eq!(
             empty_reader
                 .serial_first()
@@ -993,12 +1038,12 @@ mod tests {
         let mut reader = BufferedReader::new(vec![10, 20, 30], 2);
         reader.iterator_error_at = Some(1);
 
-        let error = read_all(&mut reader).unwrap_err();
+        let error = read_all(&reader).unwrap_err();
 
         assert!(error.to_string().contains("iteration error at index 1"));
 
         reader.fail_iterator_creation = true;
-        let error = read_all(&mut reader).unwrap_err();
+        let error = read_all(&reader).unwrap_err();
         assert!(error.to_string().contains("iterator creation error"));
     }
 
@@ -1037,7 +1082,7 @@ mod tests {
         assert_eq!(reader.serial_find_and_get(&20).unwrap(), Some(20));
         assert_eq!(reader.serial_find_by_and_get(&25).unwrap(), None);
 
-        reader.fail_read_on_call = Some(reader.read_count + 3);
+        reader.fail_read_on_call = Some(reader.read_count.get() + 3);
         let error = reader.serial_find_and_get(&20).unwrap_err();
         assert!(error.to_string().contains("read error"));
     }
@@ -1049,7 +1094,7 @@ mod tests {
             fail_iterator_creation: false,
         };
 
-        assert_eq!(read_all(&mut reader).unwrap(), [7, 14, 21]);
+        assert_eq!(read_all(&reader).unwrap(), [7, 14, 21]);
         assert_eq!(reader.serial_get(1).unwrap(), 14);
         assert_eq!(reader.serial_find(&21).unwrap(), Some(2));
         assert_eq!(
@@ -1062,7 +1107,7 @@ mod tests {
 
         reader.fail_iterator_creation = true;
         assert!(
-            read_all(&mut reader)
+            read_all(&reader)
                 .unwrap_err()
                 .to_string()
                 .contains("map iterator creation error")
@@ -1071,7 +1116,7 @@ mod tests {
 
     #[test]
     fn alternate_backend_search_propagates_missing_record_error() {
-        let mut reader = MapReader {
+        let reader = MapReader {
             records: [(0, 7), (2, 21)].into_iter().collect(),
             fail_iterator_creation: false,
         };
@@ -1082,5 +1127,85 @@ mod tests {
             error.downcast_ref::<SerialDataReaderError>(),
             Some(&SerialDataReaderError::IndexOutOfBounds { index: 1, len: 2 })
         );
+    }
+
+    /// Exercises every read operation through `&R` only, while `other` holds a
+    /// second shared borrow of the same reader.
+    fn read_through_shared_reference<R: SerialDataReader<i32>>(reader: &R, other: &R) {
+        assert_eq!(reader.serial_len(), 4);
+        assert!(!reader.serial_is_empty());
+        assert_eq!(reader.serial_get(2).unwrap(), 30);
+        assert_eq!(other.serial_get(1).unwrap(), 20);
+        assert_eq!(reader.serial_first().unwrap(), 10);
+        assert_eq!(reader.serial_last().unwrap(), 40);
+        assert_eq!(read_all(reader).unwrap(), [10, 20, 30, 40]);
+
+        assert_eq!(reader.serial_find(&30).unwrap(), Some(2));
+        assert_eq!(reader.serial_find_by(&25).unwrap(), None);
+        assert_eq!(
+            reader
+                .serial_find_by_ordering(|record| record.cmp(&40))
+                .unwrap(),
+            Some(3)
+        );
+
+        let mut context = SearchContext::none();
+        assert_eq!(
+            reader.serial_find_with_context(&20, &mut context).unwrap(),
+            Some(1)
+        );
+        assert_eq!(context, SearchContext::of(1));
+        assert_eq!(
+            reader
+                .serial_find_by_with_context(&10, &mut context)
+                .unwrap(),
+            Some(0)
+        );
+        assert_eq!(
+            reader
+                .serial_find_by_ordering_with_context(|record| record.cmp(&40), &mut context)
+                .unwrap(),
+            Some(3)
+        );
+        assert_eq!(context, SearchContext::of(3));
+
+        assert_eq!(reader.serial_find_and_get(&20).unwrap(), Some(20));
+        assert_eq!(reader.serial_find_by_and_get(&35).unwrap(), None);
+    }
+
+    #[test]
+    fn all_read_operations_work_through_a_shared_reference() {
+        let values = vec![10, 20, 30, 40];
+        read_through_shared_reference(&values, &values);
+
+        let reader = BufferedReader::new(vec![10, 20, 30, 40], 2);
+        read_through_shared_reference(&reader, &reader);
+        assert!(reader.read_count.get() > 0);
+    }
+
+    #[test]
+    fn overlapping_iteration_and_indexed_reads_share_interior_state() {
+        let records = vec![10, 20, 30, 40, 50, 60, 70];
+        let reader = BufferedReader::new(records.clone(), 2);
+        let mut iter = reader.serial_iter().unwrap();
+        let mut iterated = Vec::new();
+
+        for step in 0..records.len() {
+            iterated.push(iter.next().unwrap().unwrap());
+
+            // Read the far end of the collection to force a refill while the
+            // iterator is alive, then check the iterator's next record still
+            // comes from the right place.
+            let far = records.len() - 1 - step;
+            assert_eq!(reader.serial_get(far).unwrap(), records[far]);
+            assert_eq!(reader.serial_find(&records[far]).unwrap(), Some(far));
+            assert_eq!(reader.serial_get(step).unwrap(), records[step]);
+        }
+
+        assert!(iter.next().is_none());
+        assert_eq!(iterated, records);
+        // Interleaving moved the buffer back and forth, so the refills were
+        // real rather than served from a single cached window.
+        assert!(reader.refill_count.get() > records.len());
     }
 }

@@ -163,7 +163,7 @@ impl SerializedStruct for LargeRecord {
 fn reads_rows_larger_than_the_stack_buffer() {
     let bytes = [0x5a; LargeRecord::SIZE];
     let (_directory, _path, metadata) = open_metadata(&bytes, LargeRecord::SIZE as u64, 0);
-    let mut file = StructFile::<LargeRecord>::new(metadata).unwrap();
+    let file = StructFile::<LargeRecord>::new(metadata).unwrap();
 
     assert_eq!(file.read_value_at(0).unwrap().0, bytes);
 }
@@ -291,7 +291,7 @@ fn decode_errors_are_reported_without_removing_rows() {
 #[test]
 fn iterates_typed_rows_in_order() {
     let records = [record(1), record(2), record(3)];
-    let (_directory, _path, mut file) = struct_file(&encoded(&records));
+    let (_directory, _path, file) = struct_file(&encoded(&records));
 
     let values = file
         .serial_iter()
@@ -304,7 +304,7 @@ fn iterates_typed_rows_in_order() {
 #[test]
 fn iterator_reads_across_buffer_cache_windows() {
     let records = (0..8_195).map(record).collect::<Vec<_>>();
-    let (_directory, _path, mut file) = struct_file(&encoded(&records));
+    let (_directory, _path, file) = struct_file(&encoded(&records));
 
     let values = file
         .serial_iter()
@@ -317,7 +317,7 @@ fn iterator_reads_across_buffer_cache_windows() {
 
 #[test]
 fn iterator_reports_row_errors() {
-    let (_directory, path, mut file) = struct_file(&encoded(&[record(1), record(2)]));
+    let (_directory, path, file) = struct_file(&encoded(&[record(1), record(2)]));
     OpenOptions::new()
         .write(true)
         .open(path)
@@ -556,4 +556,31 @@ fn write_multiple_replaces_and_appends_in_slice_order() {
     );
     file.write_multiple(&[]).unwrap();
     assert_eq!(file.serial_len(), 4);
+}
+
+/// Reads a `StructFile` through a shared reference only.
+fn read_shared(file: &StructFile<Record>) {
+    let mut iter = file.serial_iter().unwrap();
+    assert_eq!(iter.next().unwrap().unwrap(), record(1));
+
+    // Indexed reads and searches while the iterator is alive.
+    assert_eq!(file.serial_get(3).unwrap(), record(4));
+    assert_eq!(file.serial_find(&record(3)).unwrap(), Some(2));
+    assert_eq!(file.serial_get(3).unwrap(), file.serial_get(3).unwrap());
+
+    let rest = iter.collect::<anyhow::Result<Vec<_>>>().unwrap();
+    assert_eq!(rest, [record(2), record(3), record(4)]);
+    assert_eq!(file.serial_first().unwrap(), record(1));
+    assert_eq!(file.serial_last().unwrap(), record(4));
+}
+
+#[test]
+fn struct_file_reads_through_a_shared_reference() {
+    let bytes = encoded(&[record(1), record(2), record(3), record(4)]);
+    let (_directory, _path, file) = struct_file(&bytes);
+
+    let shared = &file;
+    let also_shared = &file;
+    read_shared(shared);
+    assert_eq!(also_shared.read_value_at(0).unwrap(), record(1));
 }

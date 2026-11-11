@@ -1,13 +1,14 @@
 # StructFile Requirements
 
-- **Date:** 2026-11-08
+- **Date:** 2026-11-11
 - **Author:** `Olographik`
-- **Revision:** 0.1
+- **Revision:** 0.2
 - **Short description:** Specify a typed, file-backed serial collection that owns `FileMetadata` and implements `SerialDataContainer`.
 
 ## Table of contents
 
 - [Overview](#overview)
+- [Revisions](#revisions)
 - [Goals and scope](#goals-and-scope)
 - [Assumptions and dependencies](#assumptions-and-dependencies)
 - [Requirements](#requirements)
@@ -35,6 +36,12 @@ records using the same API as other serial collections.
 The file metadata prefix remains opaque to `StructFile`; the component only
 interprets the row region. The caller chooses and manages metadata bytes when
 constructing the `FileMetadata`.
+
+## Revisions
+
+| Revision | Date | Author | Changes |
+|---|---|---|---|
+| 0.2 | 2026-11-11 | `Olographik` | Public API: `read_value_at`, `serial_get`, and `serial_iter` take `&self` instead of `&mut self`, following revision 0.2 of `doc/requirements/data_container/serial_read_container.md`. No requirement IDs changed. The rest of this document still follows the previous template. |
 
 ## Goals and scope
 
@@ -149,7 +156,7 @@ impl<T: SerializedStruct> StructFile<T> {
 
     pub fn into_file_metadata(self) -> FileMetadata;
 
-    pub fn read_value_at(&mut self, index: usize) -> anyhow::Result<T>;
+    pub fn read_value_at(&self, index: usize) -> anyhow::Result<T>;
 
     pub fn write_value_at(&mut self, index: usize, value: &T) -> anyhow::Result<()>;
 
@@ -159,7 +166,9 @@ impl<T: SerializedStruct> StructFile<T> {
 
 `StructFileIter` is the associated owned-row iterator type.
 `SerialDataReader<T>` shall provide the trait's required `serial_len`,
-`serial_is_empty`, `serial_get`, and `serial_iter` behavior. Iteration yields
+`serial_is_empty`, `serial_get`, and `serial_iter` behavior through `&self`,
+as required by revision 0.2 of the serial read container requirements.
+Iteration yields
 one decoded value per complete row in ascending file order; read or decode
 failures are yielded as `Err` items and terminate iteration.
 
