@@ -10,10 +10,10 @@
 //! (typically through an `Arc<FileLock>`). It does **not** take any
 //! operating-system file lock and does not know about other processes or
 //! other handles opened on the same path. Operating-system locking is expected
-//! to be handled by the component that owns the opened files (the planned
-//! `FileAtlas`). When `FileLock` is used without such a component, the caller
-//! must make sure that no other process or handle reads or writes the file
-//! while it is in use.
+//! to be handled by the component that owns the opened files (for example
+//! [`FileAtlas`](super::file_atlas::FileAtlas)). When `FileLock` is used
+//! without such a component, the caller must make sure that no other process
+//! or handle reads or writes the file while it is in use.
 //!
 //! # Poisoning and recovery
 //!
@@ -96,8 +96,8 @@ struct Shared {
 /// This lock takes **no operating-system file lock**: it only coordinates the
 /// threads that share this `FileLock`. Protecting the file against other
 /// processes or handles is the job of the component that owns the opened
-/// files (the planned `FileAtlas`); without it, the caller must guarantee that
-/// nothing else accesses the file.
+/// files (for example [`FileAtlas`](super::file_atlas::FileAtlas)); without
+/// it, the caller must guarantee that nothing else accesses the file.
 pub struct FileLock {
     inner: RwLock<Shared>,
     generation: AtomicU64,

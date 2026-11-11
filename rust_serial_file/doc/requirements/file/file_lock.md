@@ -2,7 +2,7 @@
 
 - **Date:** 2026-11-11
 - **Author:** `Olographik`
-- **Revision:** 0.5
+- **Revision:** 0.6
 - **Short description:** Define a `FileLock` that owns a `FileMetadata` behind a reader-writer lock, granting many concurrent read borrows or one exclusive write borrow, each held until its guard is released, with guards usable directly as `StructFile` storage.
 
 ## Table of contents
@@ -85,6 +85,7 @@ typed view. `FileLock` still does not know about `StructFile`.
 | 0.3 | 2026-11-11 | `Olographik` | Poison recovery and tracking. Added `FL-FR-013` (write-guard snapshot and `PoisonReport`), `FL-FR-014` (`recover`), `FL-FR-015` (generation counter), `FL-FR-016` (limits of the report), and `FL-RS-007` (guard `Drop` never panics). Modified `FL-FR-012` (errors until `recover`), `FL-DS-002` (write acquisition reads the file length), and `FL-RS-003` (atomic generation counter allowed). Added phase P-005 (poison tracking and recovery); Coverage and Documentation renumbered to P-006 and P-007. Added tests T-019 to T-023. Updated Overview, Public API, Errors, Performance, planning reflection, and Out of scope (poison recovery resolved; mid-operation I/O errors recorded as an open issue). |
 | 0.4 | 2026-11-11 | `Olographik` | Buffered reader and writer integration. Added `FL-FR-017` (read guard usable with `BufferedReader`), `FL-FR-018` (write guard usable with `BufferedWriter`), and `FL-FR-019` (a `BufferedWriter` borrowing the write guard is flushed before the lock is released, including during unwinding). Added phase P-006 (buffered integration tests); Coverage and Documentation renumbered to P-007 and P-008 and redone. Added tests T-024 to T-030. Updated Scope, Compatibility, implementation reflection, and notes. |
 | 0.5 | 2026-11-11 | `Olographik` | Guards usable as `StructFile` storage. Added `FL-FR-020` (`Borrow<FileMetadata>` for `FileReadGuard`), `FL-FR-021` (`Borrow` and `BorrowMut<FileMetadata>` for `FileWriteGuard`), `FL-FR-022` (a `StructFile` holding a guard keeps the lock for its lifetime), and `FL-RS-008` (`Borrow` impls agree with `Deref`, no `unsafe`, no dependency on `StructFile`). Added phases P-007 (`Borrow` impls) and P-008 (`StructFile` integration tests); Coverage and Documentation renumbered to P-009 and P-010 and unchecked. Added tests T-031 to T-034. Updated Overview, Scope, Public API, Compatibility, planning reflection, and Out of scope. |
+| 0.6 | 2026-11-11 | `Olographik` | Documentation only; no requirement IDs changed. The OS-lock Out of scope item now points to `doc/requirements/file/file_atlas.md`, which specifies `FileAtlas` (exclusive `File::try_lock` on open). The two doc comments in `src/file/file_lock.rs` that called `FileAtlas` "planned" now link to it; no code changed. |
 
 ## Goals and scope
 
@@ -694,13 +695,12 @@ if let Some(report) = lock.recover()? {
 ## Out of scope
 
 - **Operating-system file locks (resolved in revision 0.2):** `FileLock` does
-  not take or check any OS file lock. A future `FileAtlas` component, to be
-  specified in its own requirements document in a later session, will own
-  all opened files and check and acquire the OS lock (for example with
-  `File::lock_shared` / `File::lock`) when a file is opened. `FileLock` has no
-  knowledge of `FileAtlas`. Until `FileAtlas` exists, callers must ensure on
-  their own that no other process or handle accesses a file wrapped in a
-  `FileLock` (`FL-RS-006`).
+  not take or check any OS file lock. `FileAtlas`, specified in
+  `doc/requirements/file/file_atlas.md`, owns the files it opens and takes an
+  exclusive OS lock (`File::try_lock`, fail fast) on each when it opens it.
+  `FileLock` has no knowledge of `FileAtlas`. A `FileLock` created without
+  the atlas still takes no OS lock, so its caller must ensure on their own
+  that no other process or handle accesses the file (`FL-RS-006`).
 - **Poison recovery (resolved in revision 0.3):** poisoning is reported as an
   error until the caller calls `recover`, which returns a `PoisonReport` and
   clears the poison (`FL-FR-012` to `FL-FR-016`). Still out of scope:
