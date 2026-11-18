@@ -60,11 +60,13 @@ revision order.
 
 ### Functional requirements
 
-Use one row per requirement. Prefix each ID with a short, recognizable
-identifier for the project, followed by its category and a zero-padded
-sequence number (for example, `MYPROJ-FR-001`). Use the same project prefix
-throughout this document so IDs are unique, stable, and easy to reference from
-tests and acceptance criteria.
+Use one row per requirement. Each ID is a short document prefix (an
+abbreviation of this requirements file's name, for example `CRT` for
+`cart.md`), then a short, recognizable identifier for the module or project,
+then its category and a zero-padded sequence number numbered within this
+document (for example, `CRT-MYPROJ-FR-001`). Use the same prefixes throughout
+this document so IDs are unique, stable, tell which document holds them, and
+are easy to reference from tests and acceptance criteria.
 
 The **Revision** column records the document revision in which the
 requirement was last added or changed. Set it to the current document revision
@@ -75,23 +77,23 @@ when the document revision increases. Record every requirement change in
 
 | ID | Requirement | Revision |
 |---|---|---|
-| `{{PROJECT_PREFIX}}-FR-001` | Describe an observable behavior the component must provide. | 0.1 |
-| `{{PROJECT_PREFIX}}-FR-002` | Describe expected behavior for relevant inputs, boundary cases, and state changes. | 0.1 |
+| `{{DOC_PREFIX}}-{{PROJECT_PREFIX}}-FR-001` | Describe an observable behavior the component must provide. | 0.1 |
+| `{{DOC_PREFIX}}-{{PROJECT_PREFIX}}-FR-002` | Describe expected behavior for relevant inputs, boundary cases, and state changes. | 0.1 |
 
 ### Data and serialization
 
 | ID | Requirement | Revision |
 |---|---|---|
-| `{{PROJECT_PREFIX}}-DS-001` | Specify data models, invariants, formats, and compatibility requirements, if applicable. | 0.1 |
-| `{{PROJECT_PREFIX}}-DS-002` | Define how invalid, missing, or incomplete data is handled. | 0.1 |
+| `{{DOC_PREFIX}}-{{PROJECT_PREFIX}}-DS-001` | Specify data models, invariants, formats, and compatibility requirements, if applicable. | 0.1 |
+| `{{DOC_PREFIX}}-{{PROJECT_PREFIX}}-DS-002` | Define how invalid, missing, or incomplete data is handled. | 0.1 |
 
 ### Rust-specific requirements
 
 | ID | Requirement | Revision |
 |---|---|---|
-| `{{PROJECT_PREFIX}}-RS-001` | Specify required traits, ownership and borrowing behavior, lifetimes, and generic bounds. | 0.1 |
-| `{{PROJECT_PREFIX}}-RS-002` | Define collection semantics and indexing behavior, if applicable. | 0.1 |
-| `{{PROJECT_PREFIX}}-RS-003` | State the Rust edition, MSRV, and any relevant platform requirements. | 0.1 |
+| `{{DOC_PREFIX}}-{{PROJECT_PREFIX}}-RS-001` | Specify required traits, ownership and borrowing behavior, lifetimes, and generic bounds. | 0.1 |
+| `{{DOC_PREFIX}}-{{PROJECT_PREFIX}}-RS-002` | Define collection semantics and indexing behavior, if applicable. | 0.1 |
+| `{{DOC_PREFIX}}-{{PROJECT_PREFIX}}-RS-003` | State the Rust edition, MSRV, and any relevant platform requirements. | 0.1 |
 
 ## Public API
 
@@ -210,7 +212,7 @@ requirement IDs it verifies.
 
 | Test ID | Requirement IDs | Description | Success requirements |
 |---|---|---|---|
-| T-001 | `{{PROJECT_PREFIX}}-FR-001` | Describe the unit, integration, or other test. | State the expected result that makes the test pass. |
+| T-001 | `{{DOC_PREFIX}}-{{PROJECT_PREFIX}}-FR-001` | Describe the unit, integration, or other test. | State the expected result that makes the test pass. |
 
 #### Test location
 

@@ -46,10 +46,19 @@ contents, and the table columns:
 
 - **Header:** today's date (`YYYY-MM-DD`), the git user name as author,
   revision `0.1` for a new document, and a one-sentence short description.
-- **Requirement IDs:** choose one short uppercase project prefix for the
-  module (reuse the prefix already used in that module's documents) and number
-  IDs as `{PREFIX}-FR-001`, `{PREFIX}-NFR-001`, and so on. Never renumber
-  existing IDs.
+- **Requirement IDs:** every ID has a **document prefix** before the
+  **module prefix**: `{DOC}-{MODULE}-{CATEGORY}-{NNN}`, for example
+  `SF-RSF-FR-001`, `SF-RSF-NFR-001`.
+  - The module prefix is one short uppercase prefix per module; reuse the
+    one already used in that module's documents.
+  - The document prefix is a short uppercase abbreviation of the
+    requirements file it is defined in (for example `CRT` for `cart.md`,
+    `PC` for `product_catalog.md`, `SF` for `struct_file.md`), unique within
+    the module, so an ID tells which document holds it.
+  - Numbers restart at `001` in each document and category.
+  - Documents written before this rule keep their IDs (`{MODULE}-FR-…`),
+    and new requirements added to them continue their own numbering. Never
+    renumber existing IDs.
 - **Requirement revision column:** set each new requirement's **Revision** to
   the current document revision. Change a requirement's Revision only when
   that requirement's content is added or changed; never bump it for
