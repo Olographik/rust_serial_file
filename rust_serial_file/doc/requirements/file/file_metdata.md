@@ -2,7 +2,7 @@
 
 - **Date:** 2026-11-25
 - **Author:** `Olographik`
-- **Revision:** 0.9
+- **Revision:** 0.10
 - **Short description:** Define a non-generic owned-file wrapper for metadata and unbuffered fixed-size row operations.
 
 ## Table of contents
@@ -45,6 +45,8 @@ wrapper does not provide synchronization; callers must coordinate writes and
 structural mutations exclusively.
 
 Since revision 0.9: `FileMetadata::sync_data` and `sync_all` (and the release of reserved rows they perform) are specified in [file_sync.md](file_sync.md).
+
+Since revision 0.10: `FileMetadata::path` (the path a file was opened from, used by blob compaction) is specified in [dynamic_storage.md](dynamic_storage.md) (`DYN-RSF-FR-015`).
 
 ## Goals and scope
 

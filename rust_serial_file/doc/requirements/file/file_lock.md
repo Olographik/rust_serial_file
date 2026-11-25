@@ -2,7 +2,7 @@
 
 - **Date:** 2026-11-25
 - **Author:** `Olographik`
-- **Revision:** 0.7
+- **Revision:** 0.8
 - **Short description:** Define a `FileLock` that owns a `FileMetadata` behind a reader-writer lock, granting many concurrent read borrows or one exclusive write borrow, each held until its guard is released, with guards usable directly as `StructFile` storage.
 
 ## Table of contents
@@ -79,6 +79,8 @@ typed view. `FileLock` still does not know about `StructFile`.
 
 Since revision 0.7: `FileLock::sync_data` and `sync_all` (taking the write lock) are specified in [file_sync.md](file_sync.md).
 
+Since revision 0.8: a `FileLock` can also own a companion blob file (`FileLock::with_blob`, `FileReadGuard::blob`, `FileWriteGuard::parts_mut`, `FileLock::into_parts`), specified in [dynamic_storage.md](dynamic_storage.md).
+
 ## Revisions
 
 | Revision | Date | Author | Changes |
@@ -89,6 +91,7 @@ Since revision 0.7: `FileLock::sync_data` and `sync_all` (taking the write lock)
 | 0.5 | 2026-11-11 | `Olographik` | Guards usable as `StructFile` storage. Added `FL-FR-020` (`Borrow<FileMetadata>` for `FileReadGuard`), `FL-FR-021` (`Borrow` and `BorrowMut<FileMetadata>` for `FileWriteGuard`), `FL-FR-022` (a `StructFile` holding a guard keeps the lock for its lifetime), and `FL-RS-008` (`Borrow` impls agree with `Deref`, no `unsafe`, no dependency on `StructFile`). Added phases P-007 (`Borrow` impls) and P-008 (`StructFile` integration tests); Coverage and Documentation renumbered to P-009 and P-010 and unchecked. Added tests T-031 to T-034. Updated Overview, Scope, Public API, Compatibility, planning reflection, and Out of scope. |
 | 0.6 | 2026-11-11 | `Olographik` | Documentation only; no requirement IDs changed. The OS-lock Out of scope item now points to `doc/requirements/file/file_atlas.md`, which specifies `FileAtlas` (exclusive `File::try_lock` on open). The two doc comments in `src/file/file_lock.rs` that called `FileAtlas` "planned" now link to it; no code changed. |
 | 0.7 | 2026-11-25 | `Olographik` | Documentation only; no requirement changed. Overview points to `file_sync.md`, which specifies the new sync methods of this component. |
+| 0.8 | 2026-11-25 | `Olographik` | Documentation only; no requirement changed. Overview points to `dynamic_storage.md`, which specifies this component's blob-file additions. |
 
 ## Goals and scope
 
