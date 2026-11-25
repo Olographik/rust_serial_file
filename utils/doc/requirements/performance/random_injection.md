@@ -2,7 +2,7 @@
 
 - **Date:** 2026-11-25
 - **Author:** `Olographik`
-- **Revision:** 0.1
+- **Revision:** 0.2
 - **Short description:** Let callers of the `utils` performance `Tester` inject their own random generator, and make `rand` an optional dependency so `utils` (and crates depending on it) can build for WebAssembly.
 
 ## Table of contents
@@ -49,6 +49,7 @@ cargo features that make `rand` and the `performance` module optional.
 
 | Revision | Date | Author | Changes |
 |---|---|---|---|
+| 0.2 | 2026-11-25 | Olographik | Implemented (P-001 to P-005). Modified `RNG-UTL-FR-004` (no `IndexRng::from_fn`: `FnIndexRng::new` only) and `RNG-UTL-FR-008` (`search::compare_binary_search` needs both `performance` and `rand`, because it calls `Tester::execute`). Assumptions updated. Decisions confirmed (approval of the document). Checklist, test results, notes, coverage and reflection filled in. |
 
 ## Goals and scope
 
@@ -77,8 +78,9 @@ cargo features that make `rand` and the `performance` module optional.
 - Features of `utils`:
   - `rand` (default): `rand` dependency, adapter for `rand::Rng`,
     `Tester::execute`.
-  - `performance` (default): the `performance` module and
-    `search::compare_binary_search`.
+  - `performance` (default): the `performance` module.
+  - `search::compare_binary_search` needs both features, since it calls
+    `Tester::execute`.
 - The `utils` binary (`src/main.rs`) declares
   `required-features = ["performance", "rand"]`.
 - Edition 2024.
@@ -92,11 +94,11 @@ cargo features that make `rand` and the `performance` module optional.
 | `RNG-UTL-FR-001` | `utils` shall define a public trait `IndexRng` with `fn next_index(&mut self, upper: usize) -> usize` returning a value in `0..upper` (`upper > 0`). | 0.1 |
 | `RNG-UTL-FR-002` | `Tester::execute_with_rand` and `Tester::execute_one_loop` shall accept any `R: IndexRng + ?Sized` instead of `T: rand::Rng`. | 0.1 |
 | `RNG-UTL-FR-003` | With the `rand` feature, every `R: rand::Rng` shall implement `IndexRng` (blanket impl), so `execute_with_rand(&mut rand::rng())` keeps compiling. | 0.1 |
-| `RNG-UTL-FR-004` | `utils` shall provide `FnIndexRng<F>` (built with `IndexRng::from_fn` or `FnIndexRng::new`), implementing `IndexRng` for any `F: FnMut(usize) -> usize`, so a caller can inject a closure (for example one calling a JavaScript random source). | 0.1 |
+| `RNG-UTL-FR-004` | `utils` shall provide `FnIndexRng<F>` (built with `FnIndexRng::new`), implementing `IndexRng` for any `F: FnMut(usize) -> usize`, so a caller can inject a closure (for example one calling a JavaScript random source). | 0.2 |
 | `RNG-UTL-FR-005` | `utils` shall provide `SplitMix64`, a dependency-free deterministic generator implementing `IndexRng`, built from a `u64` seed. | 0.1 |
 | `RNG-UTL-FR-006` | `Tester::execute_seeded(seed)` shall be available without the `rand` feature and use `SplitMix64`. | 0.1 |
 | `RNG-UTL-FR-007` | `Tester::execute()` (OS entropy) shall exist only with the `rand` feature. | 0.1 |
-| `RNG-UTL-FR-008` | The `performance` module and `search::compare_binary_search` shall exist only with the `performance` feature; `search` (binary, linear, search types) shall always be available. | 0.1 |
+| `RNG-UTL-FR-008` | The `performance` module shall exist only with the `performance` feature, and `search::compare_binary_search` only with both `performance` and `rand`; the rest of `search` (binary, linear, search types) shall always be available. | 0.2 |
 | `RNG-UTL-FR-009` | `rust_serial_file` shall depend on `utils` with `default-features = false`. `rust_python_file` keeps the defaults. | 0.1 |
 
 ### Data and serialization
@@ -195,11 +197,11 @@ closures would overlap for the compiler, which is why closures go through the
 
 ### Current implementation checklist
 
-- [ ] P-001 — `IndexRng trait and generators` — Not started
-- [ ] P-002 — `Tester uses injected generator` — Not started
-- [ ] P-003 — `Cargo features and dependents` — Not started
-- [ ] P-004 — `Coverage of touched files` — Not started
-- [ ] P-005 — `Documentation update` — Not started
+- [x] P-001 — `IndexRng trait and generators` — Done
+- [x] P-002 — `Tester uses injected generator` — Done
+- [x] P-003 — `Cargo features and dependents` — Done
+- [x] P-004 — `Coverage of touched files` — Done
+- [x] P-005 — `Documentation update` — Done
 
 **Planning reflection (complete before implementation):**
 
@@ -208,13 +210,29 @@ closures would overlap for the compiler, which is why closures go through the
 - Each phase leaves the crate building with default features.
 - Risk: the existing `test_simple_performance` test asserts timing windows of
   1 ms and is flaky on loaded machines; it is not changed by this work.
-- Decisions to confirm: the `execute_seeded` sequence change; gating the
-  whole `performance` module (it also uses `SystemTime::now`, which panics on
-  `wasm32-unknown-unknown`).
+- Confirmed with the approval of the document (2026-11-25): the
+  `execute_seeded` sequence change; gating the whole `performance` module (it
+  also uses `SystemTime::now`, which panics on `wasm32-unknown-unknown`).
 
 **Implementation reflection (update as work progresses):**
 
-- None yet.
+- Implemented on 2026-11-25; no phase added or reordered.
+- A forwarding `impl IndexRng for &mut R` was tried and removed: `rand`
+  already implements `Rng` for `&mut R`, so it overlapped with the `rand`
+  blanket impl. It is not needed, since `Tester` takes `&mut R` with
+  `R: ?Sized`.
+- `IndexRng::from_fn` was dropped from `RNG-UTL-FR-004`: a provided trait
+  method returning `FnIndexRng` would add nothing over `FnIndexRng::new`.
+- `compare_binary_search` calls `Tester::execute` (OS entropy), so it was
+  gated on `rand` as well as `performance` (`RNG-UTL-FR-008` modified) rather
+  than switched to a seeded order, which would have changed what it measures.
+- The SplitMix64 reference values in T-001 were checked against an
+  independent Python implementation of the published algorithm.
+- P-004: the old timing helpers in `performance/mod.rs` (`Display` impls,
+  `AveragePerformance::add` and `restart`, the error branches for a clock
+  going backwards) had no tests. One test was added for them
+  (`measures_record_display_and_skip_backward_clocks`) to bring the touched
+  file to full line coverage; it is not linked to a requirement.
 
 ## Testing and acceptance criteria
 
@@ -248,18 +266,38 @@ closures would overlap for the compiler, which is why closures go through the
 
 | Test ID | Date of run | Git hash | Status |
 |---|---|---|---|
-| T-001 | — | — | ⏳ Not run |
-| T-002 | — | — | ⏳ Not run |
-| T-003 | — | — | ⏳ Not run |
-| T-004 | — | — | ⏳ Not run |
-| T-005 | — | — | ⏳ Not run |
-| T-006 | — | — | ⏳ Not run |
-| T-007 | — | — | ⏳ Not run |
-| T-008 | — | — | ⏳ Not run |
+| T-001 | 2026-11-25 | `382cd46` | ✅ Success |
+| T-002 | 2026-11-25 | `382cd46` | ✅ Success |
+| T-003 | 2026-11-25 | `382cd46` | ✅ Success |
+| T-004 | 2026-11-25 | `382cd46` | ✅ Success |
+| T-005 | 2026-11-25 | `382cd46` | ✅ Success |
+| T-006 | 2026-11-25 | `382cd46` | ✅ Success |
+| T-007 | 2026-11-25 | `382cd46` | ✅ Success |
+| T-008 | 2026-11-25 | `382cd46` | ✅ Success |
 
 #### Notes
 
-- None.
+- T-001 to T-006: `cargo test` in `utils/` with default features (55 unit
+  tests and 1 doc test pass), and with `--no-default-features`,
+  `--no-default-features --features performance` and
+  `--no-default-features --features rand` (T-004 runs only with `rand`; T-005
+  and T-006 only with `performance`).
+- T-007: `cargo build --no-default-features --target wasm32-unknown-unknown`
+  and the same with `--features performance` succeed; `cargo tree
+  --no-default-features -e normal` lists `utils` alone, and with
+  `--features performance` it lists no `rand`. `cargo run --release`
+  (default features) still runs the search comparison.
+- T-008: `cargo tree -e normal` in `rust_serial_file/` shows `utils` without
+  `rand` or `getrandom`; `rust_serial_file` (202 tests) and
+  `rust_python_file` (7 tests) pass.
+- `test_simple_performance` (existing, not changed) failed once out of five
+  runs under `cargo llvm-cov`: the 100 ms sleep averaged 101 ms, outside its
+  1 ms window. It passed in the other runs and in every plain `cargo test`.
+  This is the flaky timing test noted in the planning reflection; it is not
+  in the tests of this document.
+- `cargo clippy --all-targets` reports 23 warnings, the same count as before
+  this work, all in code it did not change (`search/*.rs` and the old timing
+  helpers); none in `random.rs` or the changed `Tester` methods.
 
 #### Warning notes
 
@@ -275,22 +313,26 @@ closures would overlap for the compiler, which is why closures go through the
 
 ## Code coverage
 
-- **Coverage summary:** Not run yet.
+- **Coverage summary:** both touched source files have 100% line and function coverage; one region of `performance/mod.rs` is uncovered (see notes).
 
 ### Current coverage results
 
-- **Tool and command:** `cargo llvm-cov --summary-only` (planned)
-- **Date of run:** —
-- **Git hash:** —
+- **Tool and command:** `cargo llvm-cov --summary-only` (cargo-llvm-cov 0.9.2, default features) in `utils/`
+- **Date of run:** 2026-11-25
+- **Git hash:** `382cd46`
 
 | File name | Function coverage | Line coverage | Region coverage | Branch coverage |
 |---|---|---|---|---|
-| `utils/src/performance/mod.rs` | — | — | — | — |
-| `utils/src/random.rs` | — | — | — | — |
+| `utils/src/performance/mod.rs` | 100.00% (39/39) | 100.00% (232/232) | 99.73% (363/364) | N/A |
+| `utils/src/random.rs` | 100.00% (13/13) | 100.00% (71/71) | 100.00% (110/110) | N/A |
 
 ### Coverage notes
 
-- Not run yet.
+- **`utils/src/performance/mod.rs`:** one region is uncovered, the error
+  path of the `?` after `write!` in `impl Display for Tester` (line 256). It
+  only runs when the formatter itself fails, which a `String` or standard
+  output never does in tests. No plan to cover it. Branch coverage is `N/A`
+  (needs a nightly toolchain).
 
 ## Out of scope
 
