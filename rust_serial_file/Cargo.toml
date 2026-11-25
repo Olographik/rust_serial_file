@@ -7,7 +7,7 @@ edition = "2024"
 anyhow = "1.0.104"
 serialized_struct = { path = "../serialized_struct" }
 serialized_struct_derive={path = "../serialized_struct_derive"}
-utils={path = "../utils"}
+utils = { path = "../utils", default-features = false }
 
 [dev-dependencies]
 tempfile = "3.23.0"
