@@ -454,7 +454,7 @@ must be redone after P-010.
 - [x] P-007 — `Generic storage` — Done
 - [x] P-008 — `Read-only and writable views` — Done
 - [x] P-009 — `View tests` — Done
-- [ ] P-010 — `write_multiple start index` — Not started
+- [x] P-010 — `write_multiple start index` — Done
 - [ ] P-011 — `Coverage of touched files` — Not started
 - [ ] P-012 — `Documentation update` — Not started
 
@@ -488,6 +488,15 @@ must be redone after P-010.
      `Arc<FileLock>`), not a change to `StructFile`.
 
 **Implementation reflection (update as work progresses):**
+
+- **Revision 0.6 (2026-11-25), P-010:** implemented as planned on `8531747`.
+  The gap check runs before the empty-slice shortcut, so
+  `write_multiple(len + 1, &[])` is rejected too, as T-032 requires. The
+  block is written with one `FileMetadata::write_rows` at `start`, which
+  already refuses a start beyond the logical end; the `StructFile` check
+  gives the clearer error and avoids encoding first. A doc example shows the
+  batch-append loop. `sqlite_bench` now appends its batches with
+  `write_multiple(len, batch)` instead of writing through `FileMetadata`.
 
 - Revision 0.3 was planned and implemented on 2026-11-11 on top of
   `74e5e61`. No phase was added, removed, or reordered.
@@ -599,41 +608,46 @@ must be redone after P-010.
 
 | Test ID | Date of run | Git hash | Status |
 |---|---|---|---|
-| T-001 | 2026-11-11 | `74e5e61+dirty` | ✅ Success |
-| T-002 | 2026-11-11 | `74e5e61+dirty` | ✅ Success |
-| T-003 | 2026-11-11 | `74e5e61+dirty` | ✅ Success |
-| T-004 | 2026-11-11 | `74e5e61+dirty` | ✅ Success |
-| T-005 | 2026-11-11 | `74e5e61+dirty` | ✅ Success |
-| T-006 | 2026-11-11 | `74e5e61+dirty` | ✅ Success |
-| T-007 | 2026-11-11 | `74e5e61+dirty` | ✅ Success |
-| T-008 | 2026-11-11 | `74e5e61+dirty` | ✅ Success |
-| T-009 | 2026-11-11 | `74e5e61+dirty` | ✅ Success |
-| T-010 | 2026-11-11 | `74e5e61+dirty` | ✅ Success |
-| T-011 | 2026-11-11 | `74e5e61+dirty` | ✅ Success |
-| T-012 | 2026-11-11 | `74e5e61+dirty` | ✅ Success |
-| T-013 | 2026-11-11 | `74e5e61+dirty` | ✅ Success |
-| T-014 | 2026-11-11 | `74e5e61+dirty` | ✅ Success |
-| T-015 | 2026-11-11 | `74e5e61+dirty` | ✅ Success |
-| T-016 | 2026-11-11 | `74e5e61+dirty` | ✅ Success |
-| T-017 | — | — | ⏳ Not run |
-| T-018 | 2026-11-11 | `74e5e61+dirty` | ✅ Success |
-| T-019 | 2026-11-11 | `74e5e61+dirty` | ✅ Success |
-| T-020 | 2026-11-11 | `74e5e61+dirty` | ✅ Success |
-| T-021 | 2026-11-11 | `74e5e61+dirty` | ✅ Success |
-| T-022 | 2026-11-11 | `74e5e61+dirty` | ✅ Success |
-| T-023 | 2026-11-11 | `74e5e61+dirty` | ✅ Success |
-| T-024 | 2026-11-11 | `74e5e61+dirty` | ✅ Success |
-| T-025 | 2026-11-11 | `74e5e61+dirty` | ✅ Success |
-| T-026 | 2026-11-11 | `74e5e61+dirty` | ✅ Success |
-| T-027 | 2026-11-11 | `74e5e61+dirty` | ✅ Success |
-| T-028 | 2026-11-11 | `74e5e61+dirty` | ✅ Success |
-| T-029 | 2026-11-11 | `74e5e61+dirty` | ✅ Success |
-| T-030 | 2026-11-11 | `74e5e61+dirty` | ✅ Success |
-| T-031 | 2026-11-11 | `74e5e61+dirty` | ✅ Success |
-| T-032 | — | — | ⏳ Not run |
+| T-001 | 2026-11-25 | `8531747` | ✅ Success |
+| T-002 | 2026-11-25 | `8531747` | ✅ Success |
+| T-003 | 2026-11-25 | `8531747` | ✅ Success |
+| T-004 | 2026-11-25 | `8531747` | ✅ Success |
+| T-005 | 2026-11-25 | `8531747` | ✅ Success |
+| T-006 | 2026-11-25 | `8531747` | ✅ Success |
+| T-007 | 2026-11-25 | `8531747` | ✅ Success |
+| T-008 | 2026-11-25 | `8531747` | ✅ Success |
+| T-009 | 2026-11-25 | `8531747` | ✅ Success |
+| T-010 | 2026-11-25 | `8531747` | ✅ Success |
+| T-011 | 2026-11-25 | `8531747` | ✅ Success |
+| T-012 | 2026-11-25 | `8531747` | ✅ Success |
+| T-013 | 2026-11-25 | `8531747` | ✅ Success |
+| T-014 | 2026-11-25 | `8531747` | ✅ Success |
+| T-015 | 2026-11-25 | `8531747` | ✅ Success |
+| T-016 | 2026-11-25 | `8531747` | ✅ Success |
+| T-017 | 2026-11-25 | `8531747` | ✅ Success |
+| T-018 | 2026-11-25 | `8531747` | ✅ Success |
+| T-019 | 2026-11-25 | `8531747` | ✅ Success |
+| T-020 | 2026-11-25 | `8531747` | ✅ Success |
+| T-021 | 2026-11-25 | `8531747` | ✅ Success |
+| T-022 | 2026-11-25 | `8531747` | ✅ Success |
+| T-023 | 2026-11-25 | `8531747` | ✅ Success |
+| T-024 | 2026-11-25 | `8531747` | ✅ Success |
+| T-025 | 2026-11-25 | `8531747` | ✅ Success |
+| T-026 | 2026-11-25 | `8531747` | ✅ Success |
+| T-027 | 2026-11-25 | `8531747` | ✅ Success |
+| T-028 | 2026-11-25 | `8531747` | ✅ Success |
+| T-029 | 2026-11-25 | `8531747` | ✅ Success |
+| T-030 | 2026-11-25 | `8531747` | ✅ Success |
+| T-031 | 2026-11-25 | `8531747` | ✅ Success |
+| T-032 | 2026-11-25 | `8531747` | ✅ Success |
 
 #### Notes
 
+- Revision 0.6: the full suite (242 tests in `rust_serial_file`, including
+  doc tests) was run on 2026-11-25 at `8531747`: all pass. T-017 was
+  rewritten for the start index and T-032 added; the two encoder-failure
+  tests (T-018 and `rejects_incorrect_encoded_length`) now pass a start
+  index (`1`, the end, and `0`) and are otherwise unchanged.
 - T-001 to T-025 were first run on 2026-11-11 at `74e5e61` (clean tree) as a
   baseline for the revision 0.2 owned-only type: all passed.
 - After P-009, all tests were run on 2026-11-11 at `74e5e61+dirty` (the
