@@ -455,8 +455,8 @@ must be redone after P-010.
 - [x] P-008 — `Read-only and writable views` — Done
 - [x] P-009 — `View tests` — Done
 - [x] P-010 — `write_multiple start index` — Done
-- [ ] P-011 — `Coverage of touched files` — Not started
-- [ ] P-012 — `Documentation update` — Not started
+- [x] P-011 — `Coverage of touched files` — Done
+- [x] P-012 — `Documentation update` — Done
 
 **Planning reflection (complete before implementation):**
 
@@ -708,29 +708,30 @@ must be redone after P-010.
 
 ### Current coverage results
 
-- **Tool and command:** `cargo-llvm-cov 0.9.1` with `llvm-tools-preview`, on
-  the stable toolchain, run from `rust_serial_file/`: `cargo llvm-cov clean`,
-  then `cargo llvm-cov --all-targets`, then
-  `cargo llvm-cov report --show-missing-lines`. Branch coverage is `N/A`:
-  `--branch` needs a nightly compiler.
-- **Date of run:** 2026-11-11
-- **Git hash:** `74e5e61+dirty`
+- **Tool and command:** `cargo-llvm-cov 0.9.2` with `llvm-tools-preview`, on
+  the stable toolchain, run from `rust_serial_file/`:
+  `cargo llvm-cov --all-targets --summary-only`, and `--text` for the
+  per-line report. Branch coverage is `N/A`: `--branch` needs a nightly
+  compiler.
+- **Date of run:** 2026-11-25 (P-011, revision 0.6)
+- **Git hash:** `9873e01`
 
 | File name | Function coverage | Line coverage | Region coverage | Branch coverage |
 |---|---|---|---|---|
-| `src/file/struct_file.rs` | 100.00% (32/32) | 94.58% (227/240) | 83.56% (361/432) | N/A |
+| `src/file/struct_file.rs` | 100.00% (34/34) | 95.65% (242/253) | 84.51% (382/452) | N/A |
 
 ### Coverage notes
 
-- **`src/file/struct_file.rs`:** `--show-missing-lines` reports one source
-  line never executed: line 385, the `Err` arm of `u64::try_from(index)` in
-  `StructFileIter::next`. It is unreachable on 64-bit targets, where every
-  `usize` fits in `u64`. The other 12 missed lines and 71 missed regions are
-  per-instantiation counts: each record type and storage type (owned,
-  `&FileMetadata`, `&mut FileMetadata`, `Arc`) compiles the generic methods
-  separately, and not every instantiation runs every error path, even though
-  another instantiation covers the same source. The second generic parameter
-  did not make any source line newly unexecuted. No further plan.
+- **`src/file/struct_file.rs`:** the only source line never executed is
+  line 456, the `Err` arm of `u64::try_from(index)` in
+  `StructFileIter::next`, unreachable on 64-bit targets where every `usize`
+  fits in `u64`. The other missed lines and regions are per-instantiation
+  counts (each record and storage type compiles the generic methods
+  separately) and `?` error paths. In `write_multiple` (revision 0.6), every
+  line runs; its missed regions are the byte-length, row-count and range
+  overflow checks, the allocation failure and the `write_rows` I/O error,
+  none of which can be triggered portably. The gap check is covered by
+  T-032. No further plan.
 
 ## Out of scope
 

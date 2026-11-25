@@ -2,7 +2,7 @@
 
 - **Date:** 2026-11-25
 - **Author:** `Olographik`
-- **Revision:** 0.3
+- **Revision:** 0.4
 - **Short description:** A separate benchmark crate that measures the read and write performance of `StructFile` against an equivalent SQLite database on the same time-series workload, with comparable durability settings.
 
 ## Table of contents
@@ -42,6 +42,7 @@ it.
 |---|---|---|---|
 | 0.2 | 2026-11-25 | Olographik | Planning reflection: `criterion` confirmed as the benchmark harness; document approved. No requirement changed. |
 | 0.3 | 2026-11-25 | Olographik | Implemented (P-001 to P-009) and first results recorded in `sqlite_bench/results/summary.md`. Modified `SQC-SQB-FR-005` (batch append as one block write), `SQC-SQB-FR-008` (separate hit and miss benchmarks), `SQC-SQB-FR-009` (range as `time >= ? LIMIT ?`), `SQC-SQB-FR-011` (insert and remove in the same iteration), `SQC-SQB-FR-013` (sizes measured by the report binary), `SQC-SQB-FR-016` (sizes up to 100 000, both profiles), `SQC-SQB-DS-004` (fixture reuse). Added `SQC-SQB-FR-017` (`SQLITE_BENCH_SIZES`, `SQLITE_BENCH_DIR`). Tests T-007 and T-008 added; T-005 location corrected. Checklist, results, coverage and reflection updated. |
+| 0.4 | 2026-11-25 | Olographik | Modified `SQC-SQB-FR-005`: batch appends use `StructFile::write_multiple(len, batch)` now that it takes a start index (`struct_file.md` revision 0.6). The `append_batch` group was re-run and the summary regenerated. Scope, reflection and notes updated. |
 
 ## Goals and scope
 
@@ -58,8 +59,8 @@ it.
 
 - New crate `sqlite_bench/` with benchmark code under `benches/` and shared
   setup code in `src/`.
-- Storages: `StructFile` (block writes through its `FileMetadata` for batch
-  appends) on one side,
+- Storages: `StructFile` (`write_multiple` at the end for batch appends) on
+  one side,
   SQLite through `rusqlite` on the other.
 - Later phase: dynamic strings (blob file vs SQLite `TEXT`), once
   `dynamic_storage.md` is implemented.
@@ -91,7 +92,7 @@ it.
 | `SQC-SQB-FR-002` | A deterministic generator shall produce the records from a seed (strictly increasing `time`), so both storages receive identical data in identical order on every run. | 0.1 |
 | `SQC-SQB-FR-003` | Each benchmark shall run for data sizes of 1 000, 100 000 and 1 000 000 records. A larger size (10 000 000) shall be available behind an environment variable (`SQLITE_BENCH_LARGE=1`). | 0.1 |
 | `SQC-SQB-FR-004` | **Append one by one:** `StructFile::serial_write` per record vs one `INSERT` per record with a prepared statement inside one transaction. | 0.1 |
-| `SQC-SQB-FR-005` | **Append in batch:** batches of 1 000 records; `StructFile`: the batch is encoded and appended with one block write (`FileMetadata::write_rows` at the end, the public API for block appends; `StructFile::write_multiple` writes from row 0 and does not append); SQLite: one transaction of prepared `INSERT`s per batch. | 0.3 |
+| `SQC-SQB-FR-005` | **Append in batch:** batches of 1 000 records; `StructFile`: `write_multiple(serial_len(), batch)` (one block write per batch); SQLite: one transaction of prepared `INSERT`s per batch. | 0.4 |
 | `SQC-SQB-FR-006` | **Sequential scan:** read every record in order (`serial_iter`) vs `SELECT … ORDER BY time`, decoding into `Sample` on both sides. | 0.1 |
 | `SQC-SQB-FR-007` | **Random read by position:** 10 000 reads at seeded random positions (`read_value_at`) vs `SELECT … WHERE time = ?` with the time at that position (the position itself has no meaning in SQLite; documented). | 0.1 |
 | `SQC-SQB-FR-008` | **Search by key:** 10 000 seeded lookups of existing times (`search_hit`) and, separately, of missing times (`search_miss`): `StructFile::serial_find_by` (binary search, then reading the row) vs `SELECT … WHERE time = ?`. | 0.3 |
@@ -221,12 +222,15 @@ interface so each benchmark is written once per operation), `profile`
   reordered; the durable profile (P-005) and the dynamic strings (P-007)
   could be built directly since `file_sync.md` and `dynamic_storage.md` were
   already implemented.
-- **Batch append (`SQC-SQB-FR-005` modified).** `StructFile::write_multiple`
-  writes from row 0, so it cannot append a batch, and `BufferedWriter` needs
-  a `&mut FileMetadata` that `StructFile` does not lend. The batch is encoded
-  and appended with one `FileMetadata::write_rows` at the end, which is how a
-  user appends a block today. A block-append method on `StructFile` would
-  make this simpler; see Out of scope.
+- **Batch append (`SQC-SQB-FR-005` modified twice).** In revision 0.3,
+  `StructFile::write_multiple` always wrote from row 0, so the benchmark
+  appended through `FileMetadata::write_rows` and rebuilt the `StructFile`
+  for each batch. The owner considered row 0 a bug; `struct_file.md`
+  revision 0.6 gave `write_multiple` a start index, and since revision 0.4
+  of this document the benchmark calls `write_multiple(len, batch)`. The
+  re-run `append_batch` group is equal or slightly faster (for example
+  16.85 ms instead of 20.07 ms for 1 000 000 records, fast profile), as
+  nothing is rebuilt per batch.
 - **Range (`SQC-SQB-FR-009` modified).** `BETWEEN` on times would not
   return exactly the 100 rows the `StructFile` side reads, so SQLite uses
   `time >= ? ORDER BY time LIMIT ?`.
@@ -301,8 +305,8 @@ interface so each benchmark is written once per operation), `profile`
 - Durability on a cloud VM depends on how the host honors `fsync`; the
   durable numbers are indicative for this machine only.
 - What the first results show (ratio = SQLite / StructFile):
-  - `StructFile` is clearly faster for **batch appends** (27-43× fast,
-    2-4× durable), **full scans** (about 4.3×), **reads by position**
+  - `StructFile` is clearly faster for **batch appends** (34-40× fast,
+    2.5-4× durable), **full scans** (about 4.3×), **reads by position**
     (3.5-5.3×) and **opening** a file (51-60×), and its files are smaller
     (24 bytes per record vs 31-65 for SQLite with its WAL).
   - SQLite is clearly faster for **appends one record at a time** (about
@@ -319,9 +323,13 @@ interface so each benchmark is written once per operation), `profile`
     (fast) and favor SQLite otherwise. Each blob value costs a separate
     positioned read and write.
 - These point to possible improvements of `rust_serial_file`, not part of
-  this work: a block append on `StructFile`, buffering in `serial_write`, a
-  cached or buffered binary search, and reading several blob values per
-  call. See Out of scope.
+  this work: buffering in `serial_write`, a cached or buffered binary
+  search, and reading several blob values per call. See Out of scope. (The
+  batch append is now `write_multiple` with a start index.)
+- Revision 0.4: only the `append_batch` group was re-run, on `8531747`
+  (`cargo bench --bench compare -- append_batch`); every other result in
+  `results/summary.md` is from the full run on `79b0df1`. Batch-append
+  ratios are now 33.6-39.5 (fast) and 2.5-3.8 (durable).
 
 #### Warning notes
 
@@ -397,6 +405,5 @@ operations that only fail on I/O errors or a corrupt database.
 - Other databases (DuckDB, RocksDB, Parquet files).
 - Tuning SQLite beyond the two documented profiles.
 - Running the benchmarks in CI.
-- Improving `rust_serial_file` from these results (block append on
-  `StructFile`, buffered `serial_write`, cached binary search, batched blob
-  reads). Each would be its own requirement; decision: Olographik.
+- Improving `rust_serial_file` from these results (buffered
+  `serial_write`, cached binary search, batched blob reads). Each would be its own requirement; decision: Olographik.
