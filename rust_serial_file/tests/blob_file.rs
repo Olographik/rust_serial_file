@@ -386,3 +386,14 @@ fn freeing_drops_every_free_block_at_the_end() {
     assert_eq!(blob.stats().file_len, 16);
     assert_eq!(fs::read(&path).unwrap(), file_header());
 }
+
+#[test]
+fn blob_types_are_send_and_sync() {
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<BlobFile>();
+    assert_send_sync::<
+        rust_serial_file::file::struct_blob_file::StructBlobFile<
+            rust_serial_file::serialized_struct::BlobRef,
+        >,
+    >();
+}
