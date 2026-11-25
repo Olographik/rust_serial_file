@@ -2,7 +2,7 @@
 
 - **Date:** 2026-11-25
 - **Author:** `Olographik`
-- **Revision:** 0.2
+- **Revision:** 0.3
 - **Short description:** Extract the `serialized_struct` module of `rust_serial_file` into its own dependency-light crate that builds for `wasm32-unknown-unknown`, so browser code and the host server can share record definitions without pulling `utils` or `rand`.
 
 ## Table of contents
@@ -50,6 +50,7 @@ user of `rust_serial_file::serialized_struct`.
 | Revision | Date | Author | Changes |
 |---|---|---|---|
 | 0.2 | 2026-11-25 | Olographik | Modified `SSC-SST-DS-002` (derived `usize`/`isize` fields are 64-bit, see `serialized_struct_derive/doc/requirements/pointer_sized_fields.md`). Added `SSC-SST-FR-008` (`BlobRef` handle type for dynamic storage) and tests T-008, T-009. Out of scope updated. |
+| 0.3 | 2026-11-25 | Olographik | Implementation done (P-001 to P-005): checklist, test results, coverage and implementation reflection filled in. Crate name `serialized_struct` confirmed. P-003 completion criteria no longer include T-009, which needs the derive change of `pointer_sized_fields.md`. No requirement changed. |
 
 ## Goals and scope
 
@@ -199,17 +200,17 @@ pub struct Sample { pub time: u64, pub value: f64 }
 |---|---|---|---|
 | P-001 | **Create the crate:** add `serialized_struct/` (`Cargo.toml`, `src/lib.rs`) with the content of the current module, move `tests/serialized_struct_raw.rs` into it, add the `derive` feature. | None | `cargo test -p serialized_struct` passes; the crate has no dependency other than `anyhow` (and optional derive). |
 | P-002 | **Switch `rust_serial_file`:** add the dependency, replace `mod serialized_struct` by `pub use serialized_struct;`, delete the old module, fix internal `crate::serialized_struct` paths. | P-001 | `rust_serial_file` and `rust_python_file` build and all their tests pass unchanged. |
-| P-003 | **WebAssembly check and `BlobRef`:** add `BlobRef`; build the crate (with and without `derive`) for `wasm32-unknown-unknown`, check `cargo tree` for forbidden crates, add a test deriving a struct through each import path. | P-002 | `SSC-SST-FR-003`, `SSC-SST-FR-007`, `SSC-SST-FR-008` and `SSC-SST-RS-002` verified (T-006, T-008, T-009). |
+| P-003 | **WebAssembly check and `BlobRef`:** add `BlobRef`; build the crate (with and without `derive`) for `wasm32-unknown-unknown`, check `cargo tree` for forbidden crates, add a test deriving a struct through each import path. | P-002 | `SSC-SST-FR-003`, `SSC-SST-FR-007`, `SSC-SST-FR-008` and `SSC-SST-RS-002` verified (T-006, T-008). T-009 is run with the derive change (`pointer_sized_fields.md` P-002). |
 | P-004 | **Coverage:** run the tests with coverage for the touched files only and record the results in [Code coverage](#code-coverage). | P-001 to P-003 | Coverage is measured for every touched file, the results are recorded, and any uncovered code is justified. |
 | P-005 | **Documentation:** update this document, move `encode_decode_raw.md` into the new crate, add crate-level docs (WebAssembly usage and the `usize` warning). | P-004 | The document matches the implemented behavior and test results; public items have up-to-date doc comments. |
 
 ### Current implementation checklist
 
-- [ ] P-001 — `Create the serialized_struct crate` — Not started
-- [ ] P-002 — `Re-export from rust_serial_file` — Not started
-- [ ] P-003 — `WebAssembly build check and BlobRef` — Not started
-- [ ] P-004 — `Coverage of touched files` — Not started
-- [ ] P-005 — `Documentation update` — Not started
+- [x] P-001 — `Create the serialized_struct crate` — Done
+- [x] P-002 — `Re-export from rust_serial_file` — Done
+- [x] P-003 — `WebAssembly build check and BlobRef` — Done
+- [x] P-004 — `Coverage of touched files` — Done
+- [x] P-005 — `Documentation update` — Done
 
 **Planning reflection (complete before implementation):**
 
@@ -222,12 +223,25 @@ pub struct Sample { pub time: u64, pub value: f64 }
   both the crate and the re-export in scope under the same name with
   different items, resolution breaks; FR-005 (single definition) removes that
   risk. Risk: installing the WASM target may need network access in CI.
-- Decision to confirm: the crate name `serialized_struct` (chosen because it
-  is exactly the path the derive macro already emits).
+- Confirmed: the crate name `serialized_struct` (chosen because it is
+  exactly the path the derive macro already emits).
 
 **Implementation reflection (update as work progresses):**
 
-- None yet.
+- The plan held. The code moved with `git mv` and only gained doc comments;
+  no internal path changed in `rust_serial_file`, because
+  `crate::serialized_struct` resolves through the `pub use` re-export.
+- `encode_decode_raw.md` moved to `serialized_struct/doc/requirements/` with
+  its IDs unchanged.
+- `BlobRef` implements the traits by hand: the derive emits
+  `serialized_struct::…`, which does not resolve inside the crate itself.
+- P-003 criteria changed: T-009 checks the 64-bit layout of derived
+  `usize`/`isize` fields, which only exists after the derive change. It stays
+  ⏳ Not run here and is run with `pointer_sized_fields.md` P-002.
+- `rust_serial_file` still pulls `rand` through `utils`; this is removed by
+  `utils/doc/requirements/performance/random_injection.md`, not here. The
+  browser client is unblocked anyway, since it no longer needs
+  `rust_serial_file`.
 
 ## Testing and acceptance criteria
 
@@ -263,23 +277,43 @@ pub struct Sample { pub time: u64, pub value: f64 }
 
 | Test ID | Date of run | Git hash | Status |
 |---|---|---|---|
-| T-001 | — | — | ⏳ Not run |
-| T-002 | — | — | ⏳ Not run |
-| T-003 | — | — | ⏳ Not run |
-| T-004 | — | — | ⏳ Not run |
-| T-005 | — | — | ⏳ Not run |
-| T-006 | — | — | ⏳ Not run |
-| T-007 | — | — | ⏳ Not run |
-| T-008 | — | — | ⏳ Not run |
+| T-001 | 2026-11-25 | `daba46e` | ✅ Success |
+| T-002 | 2026-11-25 | `daba46e` | ✅ Success |
+| T-003 | 2026-11-25 | `daba46e` | ✅ Success |
+| T-004 | 2026-11-25 | `daba46e` | ✅ Success |
+| T-005 | 2026-11-25 | `daba46e` | ✅ Success |
+| T-006 | 2026-11-25 | `daba46e` | ✅ Success |
+| T-007 | 2026-11-25 | `daba46e` | ⚠️ Mitigate |
+| T-008 | 2026-11-25 | `daba46e` | ✅ Success |
 | T-009 | — | — | ⏳ Not run |
 
 #### Notes
 
-- None.
+- Commands: `cargo test --all-features` in `serialized_struct/` (T-001,
+  T-002, T-005, T-008; T-002 also runs `tests/derive_feature.rs` with the
+  `derive` feature), `cargo test` in `rust_serial_file/` (T-003, T-004,
+  T-007: all 202 tests, including doc tests, pass), `cargo fmt --check` and
+  `cargo clippy --all-targets --all-features` clean in both crates.
+- T-005: the golden bytes are written out by hand from the little-endian
+  rules; the encoder code is the pre-split code moved unchanged, so the
+  bytes are those produced before the split.
+- T-006: `cargo build --target wasm32-unknown-unknown` with and without
+  `--features derive`, plus `cargo build --tests --features derive --target
+  wasm32-unknown-unknown` (derived structs and `BlobRef` compile for wasm32).
+  `cargo tree --target wasm32-unknown-unknown -e normal --features derive`
+  lists only `anyhow` and `serialized_struct_derive` (and its proc-macro
+  dependencies).
+- T-009: not run yet; see the implementation reflection.
 
 #### Warning notes
 
-- None.
+- **T-007:** `rust_python_file` builds (`cargo build`), but `cargo test`
+  fails to link its test binary. The same failure happens on the code before
+  this change: the `pyo3` `extension-module` feature does not link libpython,
+  so test executables have unresolved Python symbols. Impact: none on these
+  requirements (the crate compiles against the re-export). Possible
+  resolution: make `extension-module` an optional feature enabled only by
+  `maturin`, so `cargo test` links libpython; to be decided by Olographik.
 
 ### Acceptance criteria
 
@@ -291,21 +325,22 @@ pub struct Sample { pub time: u64, pub value: f64 }
 
 ## Code coverage
 
-- **Coverage summary:** Not run yet.
+- **Coverage summary:** `serialized_struct/src/lib.rs` is fully covered. `rust_serial_file/src/lib.rs` was touched but has no executable code left (module declarations and a re-export).
 
 ### Current coverage results
 
-- **Tool and command:** `cargo llvm-cov --summary-only` (planned)
-- **Date of run:** —
-- **Git hash:** —
+- **Tool and command:** `cargo llvm-cov --all-features --summary-only` (cargo-llvm-cov 0.9.2) in `serialized_struct/`
+- **Date of run:** 2026-11-25
+- **Git hash:** `daba46e`
 
 | File name | Function coverage | Line coverage | Region coverage | Branch coverage |
 |---|---|---|---|---|
-| `serialized_struct/src/lib.rs` | — | — | — | — |
+| `serialized_struct/src/lib.rs` | 100.00% (9/9) | 100.00% (52/52) | 100.00% (69/69) | N/A |
 
 ### Coverage notes
 
-- Not run yet.
+- None. Branch coverage is `N/A`: it needs a nightly toolchain
+  (`--branch`), and the file has no reported branches.
 
 ## Out of scope
 
