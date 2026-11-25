@@ -2,7 +2,7 @@
 
 - **Date:** 2026-11-25
 - **Author:** `Olographik`
-- **Revision:** 0.1
+- **Revision:** 0.2
 - **Short description:** A separate benchmark crate that measures the read and write performance of `StructFile` against an equivalent SQLite database on the same time-series workload, with comparable durability settings.
 
 ## Table of contents
@@ -40,6 +40,7 @@ it.
 
 | Revision | Date | Author | Changes |
 |---|---|---|---|
+| 0.2 | 2026-11-25 | Olographik | Planning reflection: `criterion` confirmed as the benchmark harness; document approved. No requirement changed. |
 
 ## Goals and scope
 
@@ -206,9 +207,9 @@ interface so each benchmark is written once per operation), `profile`
   which mostly measures the disk.
 - Risk: noisy machines (CI, laptops). Results are indicative for the machine
   that produced them; the report records the environment.
-- Decision to confirm: `criterion` as the harness instead of the
+- Confirmed by Olographik (2026-11-25): `criterion` is the harness, not
   `utils::performance::Tester` (criterion gives statistics and run-to-run
-  comparison; `Tester` would keep the tooling in-house).
+  comparison).
 
 **Implementation reflection (update as work progresses):**
 
