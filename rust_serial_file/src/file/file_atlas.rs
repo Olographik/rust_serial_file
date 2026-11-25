@@ -86,6 +86,36 @@ impl fmt::Display for FileAtlasError {
 
 impl Error for FileAtlasError {}
 
+/// Error of [`FileAtlas::sync_all_files`]: every file that failed to sync,
+/// with its key and error.
+///
+/// Returned inside [`anyhow::Error`]; use
+/// `error.downcast_ref::<FileAtlasSyncError<K>>()` to read the failures.
+/// Unlike [`FileAtlasError`], it carries the keys, because the caller needs
+/// them to know which files may not be persisted.
+#[derive(Debug)]
+pub struct FileAtlasSyncError<K> {
+    /// The keys of the files that failed, in the atlas iteration order, with
+    /// their errors.
+    pub failures: Vec<(K, anyhow::Error)>,
+}
+
+impl<K: fmt::Debug> fmt::Display for FileAtlasSyncError<K> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "{} file(s) of the atlas failed to sync",
+            self.failures.len()
+        )?;
+        for (key, error) in &self.failures {
+            write!(formatter, "; {key:?}: {error:#}")?;
+        }
+        Ok(())
+    }
+}
+
+impl<K: fmt::Debug> Error for FileAtlasSyncError<K> {}
+
 /// A thread-safe map from keys to opened row files.
 ///
 /// Each entry is a [`FileLock`] stored in an [`Arc`]. The map has its own
@@ -369,6 +399,45 @@ impl<K: Hash + Eq> FileAtlas<K> {
         let handle = self.handle(key)?;
         let mut view = StructFile::new(handle.write()?)?;
         f(&mut view)
+    }
+
+    /// Makes the file of `key` durable with [`FileLock::sync_data`], taking
+    /// its write lock for the duration of the sync.
+    ///
+    /// # Errors
+    ///
+    /// [`FileAtlasError::KeyNotFound`], or the error of
+    /// [`FileLock::sync_data`] (including a poisoned lock).
+    pub fn sync<Q>(&self, key: &Q) -> Result<()>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        self.handle(key)?.sync_data()
+    }
+
+    /// Syncs every file of the atlas with [`FileLock::sync_data`].
+    ///
+    /// The files are taken from a snapshot of the atlas (see
+    /// [`iter`](Self::iter)); the map lock is not held while syncing, so
+    /// other files stay usable. Every file is tried, even after a failure.
+    ///
+    /// # Errors
+    ///
+    /// A [`FileAtlasSyncError<K>`] listing every key whose sync failed.
+    pub fn sync_all_files(&self) -> Result<()>
+    where
+        K: Clone + fmt::Debug + Send + Sync + 'static,
+    {
+        let failures: Vec<(K, anyhow::Error)> = self
+            .iter()
+            .filter_map(|(key, handle)| handle.sync_data().err().map(|error| (key, error)))
+            .collect();
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(FileAtlasSyncError { failures }.into())
+        }
     }
 
     fn handle<Q>(&self, key: &Q) -> Result<Arc<FileLock>>

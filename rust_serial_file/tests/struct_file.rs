@@ -747,3 +747,27 @@ fn derives_through_reexport() {
     assert_eq!(file.serial_get(0).unwrap(), record(4));
     assert_eq!(Record::SIZE, 8);
 }
+
+#[test]
+fn struct_file_sync_data() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("synced.bin");
+    let mut file = StructFile::<Record>::open_or_create(&path, 0).unwrap();
+    file.serial_write(record(1)).unwrap();
+    file.serial_write(record(2)).unwrap();
+    file.sync_data().unwrap();
+    assert_eq!(file.serial_len(), 2);
+
+    let reopened = StructFile::<Record>::open_or_create(&path, 0).unwrap();
+    assert_eq!(reopened.serial_get(1).unwrap(), record(2));
+
+    // Through a writable view, and with sync_all.
+    let mut metadata = file.into_file_metadata();
+    {
+        let mut view = StructWriteFile::<Record>::new(&mut metadata).unwrap();
+        view.serial_write(record(3)).unwrap();
+        view.sync_all().unwrap();
+    }
+    let reopened = StructFile::<Record>::open_or_create(&path, 0).unwrap();
+    assert_eq!(reopened.serial_len(), 3);
+}

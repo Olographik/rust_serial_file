@@ -230,6 +230,37 @@ impl<T: SerializedStruct, M: BorrowMut<FileMetadata>> StructFile<T, M> {
         Ok(())
     }
 
+    /// Makes every record written so far durable, with
+    /// [`FileMetadata::sync_data`]. The collection length is unchanged.
+    ///
+    /// Read-only views ([`StructReadOnlyFile`]) cannot sync:
+    ///
+    /// ```compile_fail,E0599
+    /// use rust_serial_file::{
+    ///     file::struct_file::StructReadOnlyFile, serialized_struct::SerializedStruct,
+    /// };
+    ///
+    /// fn sync<T: SerializedStruct>(view: &mut StructReadOnlyFile<'_, T>) {
+    ///     view.sync_data().unwrap();
+    /// }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// As [`FileMetadata::sync_data`].
+    pub fn sync_data(&mut self) -> Result<()> {
+        self.file_metadata_mut().sync_data()
+    }
+
+    /// Like [`sync_data`](Self::sync_data), with [`FileMetadata::sync_all`].
+    ///
+    /// # Errors
+    ///
+    /// As [`FileMetadata::sync_all`].
+    pub fn sync_all(&mut self) -> Result<()> {
+        self.file_metadata_mut().sync_all()
+    }
+
     fn shift_rows_left(&mut self, start: usize, end: usize) -> Result<()> {
         if start >= end {
             return Ok(());

@@ -242,6 +242,30 @@ impl FileLock {
         }
     }
 
+    /// Takes the write lock and makes the file durable with
+    /// [`FileMetadata::sync_data`]. Blocks like [`FileLock::write`].
+    ///
+    /// The write guard is released normally afterwards, so
+    /// [`generation`](Self::generation) increases: a sync can truncate rows
+    /// reserved with [`FileMetadata::reserve_rows`].
+    ///
+    /// # Errors
+    ///
+    /// The errors of [`FileLock::write`] (including a poisoned lock), or of
+    /// [`FileMetadata::sync_data`].
+    pub fn sync_data(&self) -> Result<()> {
+        self.write()?.sync_data()
+    }
+
+    /// Like [`sync_data`](Self::sync_data), with [`FileMetadata::sync_all`].
+    ///
+    /// # Errors
+    ///
+    /// As [`sync_data`](Self::sync_data).
+    pub fn sync_all(&self) -> Result<()> {
+        self.write()?.sync_all()
+    }
+
     /// Number of write guards released normally (not by a panic) since the
     /// lock was created. Read guards, [`FileLock::get_mut`], and write guards
     /// dropped by a panic do not change it. Readable even when poisoned.

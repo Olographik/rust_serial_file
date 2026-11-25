@@ -532,3 +532,95 @@ fn reports_row_reservation_failures() {
     assert!(read_only.reserve_rows(1).is_err());
     assert_eq!(read_only.file_len().unwrap(), 0);
 }
+
+/// Opens (or creates) `path` and returns a fresh handle, as a reopen would.
+fn reopen(path: &std::path::Path, element_size: u64, data_offset: u64) -> FileMetadata {
+    FileMetadata::open_or_create(path, element_size, data_offset).unwrap()
+}
+
+fn file_bytes(path: &std::path::Path) -> Vec<u8> {
+    std::fs::read(path).unwrap()
+}
+
+#[test]
+fn sync_data_persists_rows() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("rows.bin");
+    let mut metadata = reopen(&path, 2, 3);
+    metadata.update_raw_metadata(b"hdr").unwrap();
+    metadata.append_row(&[1, 2]).unwrap();
+    metadata.append_row(&[3, 4]).unwrap();
+    metadata.sync_data().unwrap();
+
+    let second = reopen(&path, 2, 3);
+    assert_eq!(second.element_count().unwrap(), 2);
+    assert_eq!(file_bytes(&path), b"hdr\x01\x02\x03\x04");
+}
+
+#[test]
+fn sync_all_persists_rows() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("rows.bin");
+    let mut metadata = reopen(&path, 2, 0);
+    metadata.write_rows(0, &[5, 6, 7, 8, 9, 10]).unwrap();
+    metadata.sync_all().unwrap();
+
+    let second = reopen(&path, 2, 0);
+    assert_eq!(second.element_count().unwrap(), 3);
+    assert_eq!(file_bytes(&path), [5, 6, 7, 8, 9, 10]);
+}
+
+#[test]
+fn sync_trims_reserved_rows() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("rows.bin");
+    let mut metadata = reopen(&path, 2, 1);
+    metadata.update_raw_metadata(&[0xAA]).unwrap();
+    metadata.write_rows(0, &[1, 1, 2, 2, 3, 3]).unwrap();
+    metadata.reserve_rows(100).unwrap();
+    assert_eq!(metadata.file_len().unwrap(), 1 + 100 * 2);
+    assert_eq!(metadata.element_count().unwrap(), 3);
+
+    // Without the sync, a reopen counts the reserved zero rows as real rows.
+    assert_eq!(reopen(&path, 2, 1).element_count().unwrap(), 100);
+
+    metadata.sync_data().unwrap();
+    assert_eq!(metadata.file_len().unwrap(), 1 + 3 * 2);
+    assert_eq!(reopen(&path, 2, 1).element_count().unwrap(), 3);
+    assert_eq!(file_bytes(&path), [0xAA, 1, 1, 2, 2, 3, 3]);
+
+    // Appending after the trim extends the file again.
+    metadata.append_row(&[4, 4]).unwrap();
+    metadata.reserve_rows(10).unwrap();
+    metadata.sync_all().unwrap();
+    assert_eq!(file_bytes(&path), [0xAA, 1, 1, 2, 2, 3, 3, 4, 4]);
+    assert_eq!(metadata.element_count().unwrap(), 4);
+}
+
+#[test]
+fn sync_keeps_file_changed_by_another_handle() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("rows.bin");
+    let mut metadata = reopen(&path, 2, 0);
+    metadata.append_row(&[1, 1]).unwrap();
+    metadata.reserve_rows(4).unwrap();
+
+    // Another handle shortens the file: the reservation is no longer ours,
+    // so sync must not truncate anything.
+    let mut other = reopen(&path, 2, 0);
+    other.truncate_rows(2).unwrap();
+    metadata.sync_data().unwrap();
+    assert_eq!(metadata.file_len().unwrap(), 4);
+    assert_eq!(metadata.element_count().unwrap(), 2);
+}
+
+#[test]
+fn sync_without_writes_is_noop() {
+    let (directory, mut metadata) = open_metadata(&[1, 2, 3, 4], 2, 0);
+    let path = directory.path().join("records.bin");
+    metadata.sync_data().unwrap();
+    metadata.sync_all().unwrap();
+    metadata.sync_data().unwrap();
+    assert_eq!(file_bytes(&path), [1, 2, 3, 4]);
+    assert_eq!(metadata.element_count().unwrap(), 2);
+}

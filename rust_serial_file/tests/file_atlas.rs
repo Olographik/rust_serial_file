@@ -12,7 +12,9 @@ use std::{
 use rust_serial_file::{
     adapter::{abstract_serial_read::SerialDataReader, abstract_serial_write::SerialDataWriter},
     file::{
-        file_atlas::{FileAtlas, FileAtlasError, FileAtlasIntoIter, FileAtlasIter},
+        file_atlas::{
+            FileAtlas, FileAtlasError, FileAtlasIntoIter, FileAtlasIter, FileAtlasSyncError,
+        },
         file_metadata::FileMetadata,
         struct_file::StructFile,
     },
@@ -725,4 +727,68 @@ fn atlas_iterators_have_the_expected_traits() {
     File::create(&path).unwrap();
     assert!(can_lock(&path));
     assert!(can_lock(&path));
+}
+
+#[test]
+fn atlas_sync_one() {
+    let directory = tempdir().unwrap();
+    let atlas = atlas_with_rows(&directory, "key", 2);
+    atlas
+        .with_write("key", |file| file.reserve_rows(50))
+        .unwrap();
+    atlas.sync("key").unwrap();
+    assert_eq!(
+        fs::metadata(path_in(&directory, "key")).unwrap().len(),
+        2 * ROW_SIZE
+    );
+    assert_eq!(
+        atlas_error(atlas.sync("missing")),
+        FileAtlasError::KeyNotFound
+    );
+}
+
+#[test]
+fn atlas_sync_all_reports_failures() {
+    let directory = tempdir().unwrap();
+    let atlas = atlas_with_keys(&directory, &["a", "b", "c"]);
+    for key in ["a", "b", "c"] {
+        atlas
+            .with_write(key, |file| {
+                file.append_row(&row(1))?;
+                file.reserve_rows(8)
+            })
+            .unwrap();
+    }
+    atlas.sync_all_files().unwrap();
+
+    // Poison "b": the other two files are still synced.
+    for key in ["a", "c"] {
+        atlas.with_write(key, |file| file.reserve_rows(8)).unwrap();
+    }
+    let handle = atlas.get("b").unwrap();
+    let result = thread::spawn(move || {
+        let _guard = handle.write().unwrap();
+        panic!("intentional panic while holding the write guard");
+    })
+    .join();
+    assert!(result.is_err());
+
+    let error = atlas.sync_all_files().unwrap_err();
+    let sync_error = error
+        .downcast_ref::<FileAtlasSyncError<String>>()
+        .expect("a FileAtlasSyncError");
+    assert_eq!(sync_error.failures.len(), 1);
+    assert_eq!(sync_error.failures[0].0, "b");
+    let message = error.to_string();
+    assert!(message.starts_with("1 file(s) of the atlas failed to sync; \"b\": "));
+    assert!(message.contains("poisoned"), "{message}");
+    for key in ["a", "c"] {
+        assert_eq!(
+            fs::metadata(path_in(&directory, key)).unwrap().len(),
+            ROW_SIZE
+        );
+    }
+
+    // An empty atlas has nothing to sync.
+    assert!(FileAtlas::<String>::new().sync_all_files().is_ok());
 }
