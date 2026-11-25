@@ -2,8 +2,8 @@
 
 - **Date:** 2026-11-25
 - **Author:** `Olographik`
-- **Revision:** 0.2
-- **Short description:** Make the derive macros encode and decode `usize` and `isize` struct fields as 64-bit little-endian values, so a derived struct has the same size and byte layout on `wasm32` and on 64-bit hosts.
+- **Revision:** 0.3
+- **Short description:** Make the derive macros reject `usize` and `isize` struct fields with a clear compile error, because their size depends on the target and serialized records must have the same layout on every platform.
 
 ## Table of contents
 
@@ -29,47 +29,52 @@
 `serialized_struct_derive` provides `#[derive(SerializedStruct)]`,
 `#[derive(EncodeRaw)]` and `#[derive(DecodeRaw)]`. Each field is encoded
 through its own `EncodeRaw`/`DecodeRaw` implementation and `SIZE` is the sum of
-the fields' `SIZE`. For `usize` and `isize` this is the target's pointer width:
-4 bytes on `wasm32`, 8 bytes on 64-bit hosts. A struct shared between the
-WebAssembly browser client and the host server therefore has a different
-`SIZE` and layout on each side, and the bytes cannot be exchanged.
+the fields' `SIZE`. `usize` and `isize` have the target's pointer width:
+4 bytes on `wasm32`, 8 bytes on 64-bit hosts. A record using them would have a
+different `SIZE` and layout on the WebAssembly browser client and on the host
+server, which defeats the purpose of these records: a platform-independent
+byte format.
 
-This document requires the derive macros to detect `usize` and `isize` fields
-and always encode them as `u64` / `i64` (8 bytes, little-endian), and decode
-them back with a range check.
+Revision 0.1 planned to widen such fields to 64 bits. After reflection, the
+owner chose to reject them instead: the derive reports a compile error on each
+`usize`/`isize` field, telling the user to use a fixed-width type or to write
+the encoding by hand. The `serialized_struct` crate also stops implementing the
+traits for `usize` and `isize` (`RSF-DS-004` in `encode_decode_raw.md`,
+`SSC-SST-FR-002` in `serialized_struct_crate.md`), so every way of encoding
+them fails at compile time.
 
 ## Revisions
 
 | Revision | Date | Author | Changes |
 |---|---|---|---|
 | 0.2 | 2026-11-25 | Olographik | Planning reflection: panic in the raw decoder confirmed by the owner; clarified that `try_decode` is the path used by `StructFile`. No requirement changed. |
+| 0.3 | 2026-11-25 | Olographik | Design changed from widening `usize`/`isize` fields to rejecting them at compile time. Modified `PSF-SSD-FR-001` to `PSF-SSD-FR-004`, `PSF-SSD-DS-001`, `PSF-SSD-DS-002`, `PSF-SSD-RS-001`, `PSF-SSD-RS-002`. Removed `PSF-SSD-FR-006` (range-checked `try_decode`) and `PSF-SSD-DS-003` (raw decode panic), which no longer apply. Tests T-002 to T-006 redefined, T-007 added. Phases P-002 redefined. Implemented, with results, coverage and reflection. |
 
 ## Goals and scope
 
 ### Goals
 
-- A derived struct has the same `SIZE` and byte layout on every target,
-  including when it has `usize`/`isize` fields.
-- Files already written on 64-bit hosts are read unchanged (they already use
-  8 bytes for these fields).
-- A value that does not fit the decoding target's `usize`/`isize` is never
-  silently truncated.
+- A struct with a `usize` or `isize` field does not compile with any of the
+  three derives.
+- The compile error points at the field and says what to do instead.
+- Structs without such fields expand exactly as before.
 
 ### Scope
 
 - `serialized_struct_derive/src/lib.rs`: the three derives, for named and
   tuple structs.
-- Unchanged: the primitive `impl` of the traits for `usize`/`isize` in the
-  `serialized_struct` crate (still native width when used directly, for
-  example `StructFile<usize>`); every other field type.
+- Related change in another module (own documents): removal of the
+  `usize`/`isize` trait implementations in `serialized_struct`.
+- Unchanged: code generated for every other field type.
 
 ## Assumptions and dependencies
 
-- Supported targets have a pointer width of at most 64 bits, so `usize → u64`
-  and `isize → i64` are always lossless on encode.
 - Detection is syntactic (the proc macro sees tokens, not resolved types).
-- Dependencies unchanged: `syn` 2, `quote`, `proc-macro2`.
-- The generated code refers to `serialized_struct::…` as today (see
+  Anything it cannot recognize by name still fails, because the
+  `serialized_struct` crate has no `usize`/`isize` implementations.
+- Dependencies unchanged: `syn` 2, `quote`, `proc-macro2`. The end-to-end
+  compile-fail tests use `trybuild` as a dev-dependency of `serialized_struct`.
+- The generated code refers to `serialized_struct::…` as before (see
   `SSC-SST-RS-003` in `serialized_struct/doc/requirements/serialized_struct_crate.md`).
 
 ## Requirements
@@ -78,83 +83,73 @@ them back with a range check.
 
 | ID | Requirement | Revision |
 |---|---|---|
-| `PSF-SSD-FR-001` | A field whose type is the path `usize` (also written `core::primitive::usize`, `std::primitive::usize`, `::core::primitive::usize`, `::std::primitive::usize`) shall be encoded as `(value as u64)` with the `u64` encoder. | 0.1 |
-| `PSF-SSD-FR-002` | A field whose type is the path `isize` (same accepted spellings) shall be encoded as `(value as i64)` with the `i64` encoder. | 0.1 |
-| `PSF-SSD-FR-003` | Such fields shall be decoded by reading a `u64` / `i64` and converting with `usize::try_from` / `isize::try_from`. | 0.1 |
-| `PSF-SSD-FR-004` | `#[derive(SerializedStruct)]` shall count 8 bytes for each such field in `SIZE` (`<u64 as SerializedStruct>::SIZE` / `<i64 as …>::SIZE`). | 0.1 |
+| `PSF-SSD-FR-001` | A field whose type is the path `usize` (also written `core::primitive::usize`, `std::primitive::usize`, `::core::primitive::usize`, `::std::primitive::usize`, or wrapped in parentheses or an invisible macro group) shall make the derive emit a compile error. | 0.3 |
+| `PSF-SSD-FR-002` | The same applies to `isize`, with the same accepted spellings. | 0.3 |
+| `PSF-SSD-FR-003` | The error shall be attached to the field's type and say which derive, which primitive, which field (name, or index for tuple structs) and which struct, and suggest a fixed-width type (for example `u64` or `i64`) or a hand-written `EncodeRaw`, `DecodeRaw` and `SerializedStruct` implementation. | 0.3 |
+| `PSF-SSD-FR-004` | One error shall be reported per offending field, and no trait implementation shall be generated for a struct with such a field. | 0.3 |
 | `PSF-SSD-FR-005` | The rule applies to the three derives (`SerializedStruct`, `EncodeRaw`, `DecodeRaw`) and to named and tuple structs. | 0.1 |
-| `PSF-SSD-FR-006` | `#[derive(SerializedStruct)]` shall generate a `try_decode` override that returns an error when a pointer-sized field's stored value does not fit the target's `usize`/`isize`, in addition to the existing length check. | 0.1 |
 
 ### Data and serialization
 
 | ID | Requirement | Revision |
 |---|---|---|
-| `PSF-SSD-DS-001` | Pointer-sized fields occupy exactly 8 bytes, little-endian, at their declaration position, on every target. | 0.1 |
-| `PSF-SSD-DS-002` | On 64-bit targets the bytes are identical to the current output, so existing files stay readable. | 0.1 |
-| `PSF-SSD-DS-003` | The raw decoder (`from_le_bytes_slices`), which cannot return an error, shall panic with a message naming the struct and field when a value does not fit, consistent with the raw API panicking on short slices. Callers decoding untrusted bytes use `try_decode`. | 0.1 |
+| `PSF-SSD-DS-001` | A derived record never contains a field whose width depends on the target, so its `SIZE` and byte layout are the same on every platform. | 0.3 |
+| `PSF-SSD-DS-002` | For structs without `usize`/`isize` fields, the generated code, `SIZE` and bytes are unchanged. | 0.3 |
 
 ### Rust-specific requirements
 
 | ID | Requirement | Revision |
 |---|---|---|
-| `PSF-SSD-RS-001` | Type aliases (`type Index = usize;`), `usize` inside other types (`Option<usize>`, arrays, generics) and nested structs are not detected; they keep their own implementation. The derive documentation shall say so. A nested struct that itself derives `SerializedStruct` is handled by its own derive. | 0.1 |
-| `PSF-SSD-RS-002` | The generated code shall not use `unsafe` and shall compile without warnings (no `clippy::cast_possible_truncation` on the encode cast, which is widening). | 0.1 |
+| `PSF-SSD-RS-001` | Type aliases (`type Index = usize;`), `usize` inside other types (`Option<usize>`, arrays, generics) and nested structs are not recognized by name. They still fail to compile, with the compiler's "trait not implemented" error, because `usize`/`isize` do not implement the traits. The crate documentation shall say so. | 0.3 |
+| `PSF-SSD-RS-002` | No `unsafe` code. Each derive's expansion shall be a plain function over `syn::DeriveInput`, so it can be unit tested; the `#[proc_macro_derive]` functions only parse and delegate. | 0.3 |
 | `PSF-SSD-RS-003` | Edition and dependencies of `serialized_struct_derive` unchanged. | 0.1 |
 
 ## Public API
 
-No new public item. Generated code, for
+No new public item. A struct such as
 
 ```rust
 #[derive(SerializedStruct)]
 struct Row { time: u64, index: usize }
 ```
 
-becomes, in essence:
+fails to compile with:
 
-```rust
-// encode
-offset += self.time.encode(&mut data[offset..]);
-offset += (self.index as u64).encode(&mut data[offset..]);
-
-// decode
-index: {
-    let raw = <u64 as serialized_struct::DecodeRaw>::from_le_bytes_slices(bytes, offset);
-    usize::try_from(raw).expect("Row.index: stored value does not fit in usize")
-},
-
-// size
-const SIZE: usize = <u64 as SerializedStruct>::SIZE + <u64 as SerializedStruct>::SIZE;
+```text
+error: #[derive(SerializedStruct)] does not support the `usize` field `index` of `Row`: its size depends on the target platform. Use a fixed-width type (for example `u64` or `i64`), or implement `EncodeRaw`, `DecodeRaw` and `SerializedStruct` by hand for this struct.
+ --> src/main.rs:4:12
+  |
+4 |     index: usize,
+  |            ^^^^^
 ```
+
+A user who needs `usize` in memory implements the three traits on the record
+by hand and chooses the stored width (for example `u64`, with a checked
+conversion on decode).
 
 ## Errors and failure behavior
 
-- Encode never fails for pointer-sized fields (widening conversion).
-- `try_decode`: returns an error naming the field when the value does not fit
-  (`PSF-SSD-FR-006`). Only possible on targets narrower than 64 bits.
-- Raw decode: panics with the same message (`PSF-SSD-DS-003`).
+- Failures are compile errors only; nothing changes at run time.
+- Enums and unions still make the derive panic with "supports only structs"
+  (unchanged behavior; the compiler reports it as a derive error).
 
 ## Safety and security
 
-- None: no `unsafe` code is generated.
-- Bytes from the browser are untrusted: the range check prevents an
-  out-of-range value from being truncated into a wrong index.
+- None: no `unsafe` code is generated or used.
 
 ## Compatibility
 
-- 64-bit hosts: byte-identical, no migration.
-- `wasm32` (and any 32-bit target): `SIZE` and layout change for structs with
-  `usize`/`isize` fields. Data written on a 32-bit target with the old derive
-  cannot be read with the new one; no such persisted data is known (the
-  browser only exchanges messages).
-- Source compatible: field types and user code unchanged.
+- Breaking for any downstream record that derives the traits with a
+  `usize`/`isize` field: it no longer compiles and must switch to a
+  fixed-width type or a hand-written implementation. None exists in this
+  workspace.
+- Data compatibility: unaffected for every record that still compiles
+  (`PSF-SSD-DS-002`).
 
 ## Performance and resource use
 
-- One widening cast per field on encode, one range check on decode;
-  negligible.
-- On 32-bit targets, records with pointer-sized fields grow by 4 bytes per
-  field. Accepted as the cost of a stable layout.
+- No run-time effect. The extra check is a scan of the field types at
+  compile time.
 
 ## Phases
 
@@ -163,35 +158,36 @@ const SIZE: usize = <u64 as SerializedStruct>::SIZE + <u64 as SerializedStruct>:
 | Phase ID | Phase and implementation steps | Dependencies | Completion criteria |
 |---|---|---|---|
 | P-001 | **Detection helper:** function recognizing the accepted `usize`/`isize` paths in a `syn::Type`. | None | Unit tests of the helper pass (T-001). |
-| P-002 | **Code generation:** use the helper in encode, decode, `SIZE` and the new `try_decode` override. | P-001, and the `serialized_struct` crate extraction (P-002 of `serialized_struct_crate.md`) so tests use the new crate. | T-002 to T-006 pass. |
+| P-002 | **Compile errors:** emit one spanned error per offending field in each derive, move expansions into testable functions, add `trybuild` and `compile_fail` tests. | P-001, and the `serialized_struct` crate extraction. | T-002 to T-007 pass. |
 | P-003 | **Coverage:** run the tests with coverage for the touched files only and record the results in [Code coverage](#code-coverage). | P-001, P-002 | Coverage is measured for every touched file, the results are recorded, and any uncovered code is justified. |
 | P-004 | **Documentation:** update this requirements document and the code comments of the touched files (derive docs list what is and is not detected). | P-003 | The document matches the implemented behavior and test results; public items in the touched files have up-to-date doc comments. |
 
 ### Current implementation checklist
 
-- [ ] P-001 — `Pointer-sized type detection` — Not started
-- [ ] P-002 — `Generated encode, decode, SIZE and try_decode` — Not started
-- [ ] P-003 — `Coverage of touched files` — Not started
-- [ ] P-004 — `Documentation update` — Not started
+- [x] P-001 — `Pointer-sized type detection` — Done
+- [x] P-002 — `Compile errors for pointer-sized fields` — Done
+- [x] P-003 — `Coverage of touched files` — Done
+- [x] P-004 — `Documentation update` — Done
 
 **Planning reflection (complete before implementation):**
 
 - Detection is isolated so it can be tested without expanding code.
-- Risk: proc-macro tests run on the host (64-bit), so the "does not fit"
-  branch cannot be reached by decoding on the host. The 32-bit check is done
-  by building for `wasm32-unknown-unknown` and running the range-check logic
-  through `try_decode` on a crafted buffer with a value above `u32::MAX`
-  under a 32-bit target, or by testing the generated conversion against
-  `u32` in a unit test of the emitted pattern.
-- Confirmed by Olographik (2026-11-25): the raw decoder panics
-  (`PSF-SSD-DS-003`). `StructFile`, `FileAtlas` and the iterators decode with
-  `try_decode`, so they get an error, not a panic. This works only because the
-  derive overrides `try_decode` (`PSF-SSD-FR-006`): the default `try_decode`
-  checks the length and then calls the raw decoder, which would panic.
+- Revision 0.3: rejecting is simpler and safer than widening. No run-time
+  range check or panic is needed, and the layout question cannot come back
+  through `StructFile<usize>`, since the primitive implementations are gone
+  too.
 
 **Implementation reflection (update as work progresses):**
 
-- None yet.
+- Implemented on 2026-11-25. P-002 changed from "widen to 64 bits" to
+  "reject" before any widening code was written; no phase was added.
+- The `trybuild` test for a type alias was dropped: its expected output was
+  the compiler's own trait-error text, which changes between Rust versions.
+  The alias case is covered by a `compile_fail` doc test in
+  `serialized_struct/src/lib.rs` instead, which only requires that it fails.
+- To make the generators testable, each derive's expansion moved into
+  `expand_encode_raw`, `expand_decode_raw` and `expand_serialized_struct`
+  (`PSF-SSD-RS-002`). The generated code itself did not change.
 
 ## Testing and acceptance criteria
 
@@ -199,38 +195,49 @@ const SIZE: usize = <u64 as SerializedStruct>::SIZE + <u64 as SerializedStruct>:
 
 | Test ID | Requirement IDs | Description | Success requirements |
 |---|---|---|---|
-| T-001 | `PSF-SSD-FR-001`, `PSF-SSD-FR-002`, `PSF-SSD-RS-001` | Detection helper on `usize`, `isize`, `core::primitive::usize`, `::std::primitive::isize`, `u64`, `Option<usize>`, alias path `Index`. | First four detected, last three not. |
-| T-002 | `PSF-SSD-FR-004`, `PSF-SSD-DS-001` | `SIZE` of `struct A { a: u8, b: usize, c: isize }`. | `SIZE == 17` on every target (checked on host and in the wasm build with a `const` assertion). |
-| T-003 | `PSF-SSD-FR-001`, `PSF-SSD-FR-002`, `PSF-SSD-FR-003`, `PSF-SSD-DS-002` | Round trip and golden bytes for named and tuple structs with `usize`/`isize` fields (including `isize::MIN`, `-1`). | Bytes equal `u64`/`i64` little-endian encodings; decode returns the original. |
-| T-004 | `PSF-SSD-FR-005` | `#[derive(EncodeRaw, DecodeRaw)]` alone on a struct with a `usize` field. | Same bytes as T-003. |
-| T-005 | `PSF-SSD-FR-006`, `PSF-SSD-DS-003` | Value `u64::MAX` decoded into a `usize` field on a 32-bit target (wasm build test or simulated through the emitted conversion). | `try_decode` errors naming the field; raw decode panics with that message. |
-| T-006 | `PSF-SSD-RS-002` | `cargo clippy --all-targets -- -D warnings` on a crate using the derive, and `cargo build --target wasm32-unknown-unknown` of the `serialized_struct` derive test. | No warnings; build succeeds. |
+| T-001 | `PSF-SSD-FR-001`, `PSF-SSD-FR-002`, `PSF-SSD-RS-001` | Detection helper on `usize`, `isize`, `core::primitive::usize`, `::std::primitive::isize`, `(usize)`, a grouped `isize`, and on `u64`, `i32`, `Option<usize>`, `[usize; 2]`, alias `Index`, `::usize`, `other::primitive::usize`, `core::usize`, `<T as Trait>::usize`. | The first six are detected, the others are not. |
+| T-002 | `PSF-SSD-FR-001`, `PSF-SSD-FR-003`, `PSF-SSD-FR-005` | `trybuild`: `#[derive(SerializedStruct)]` on a named struct with a `usize` field. | Fails with the expected message, pointing at the field type. |
+| T-003 | `PSF-SSD-FR-002`, `PSF-SSD-FR-003`, `PSF-SSD-FR-005` | `trybuild`: tuple struct with a `core::primitive::isize` field. | Fails with the field index `1` in the message. |
+| T-004 | `PSF-SSD-FR-004`, `PSF-SSD-FR-005` | `trybuild`: `#[derive(EncodeRaw)]` and `#[derive(DecodeRaw)]` alone on structs with `usize` / `isize` fields; unit test with two offending fields. | One error per field, naming the derive used; no implementation generated. |
+| T-005 | `PSF-SSD-RS-001`, `PSF-SSD-DS-001` | `compile_fail` doc test: field typed with an alias of `usize`. | Does not compile. |
+| T-006 | `PSF-SSD-DS-002`, `PSF-SSD-RS-002` | Unit tests of the expansions on named, tuple and unit structs, and on an enum and a union. | Generated code as before; enums/unions panic with "supports only structs". |
+| T-007 | `PSF-SSD-DS-001`, `PSF-SSD-DS-002` | Existing derive users still compile and pass: `serialized_struct`, `rust_serial_file`, `rust_python_file` tests; `cargo build --tests --features derive --target wasm32-unknown-unknown` in `serialized_struct`; clippy. | All pass; no new warning. |
 
 #### Test location
 
 | Test ID | File | Test name |
 |---|---|---|
 | T-001 | `serialized_struct_derive/src/lib.rs` (unit tests) | `detects_pointer_sized_types` |
-| T-002 | `serialized_struct/tests/derive.rs` | `pointer_sized_fields_are_8_bytes` |
-| T-003 | `serialized_struct/tests/derive.rs` | `pointer_sized_round_trip_and_bytes` |
-| T-004 | `serialized_struct/tests/derive.rs` | `separate_derives_widen_pointer_sized` |
-| T-005 | `serialized_struct/tests/derive.rs` | `pointer_sized_out_of_range` |
-| T-006 | Shell check (documented command) | `clippy + wasm32 build` |
+| T-002 | `serialized_struct/tests/compile_fail.rs` + `tests/ui/usize_field.rs` | `pointer_sized_fields_are_rejected` |
+| T-003 | `serialized_struct/tests/compile_fail.rs` + `tests/ui/isize_tuple_field.rs` | `pointer_sized_fields_are_rejected` |
+| T-004 | `serialized_struct/tests/compile_fail.rs` + `tests/ui/raw_derives_usize.rs`; `serialized_struct_derive/src/lib.rs` | `pointer_sized_fields_are_rejected`, `rejects_only_structs_with_pointer_sized_fields`, `expansions_report_pointer_sized_fields` |
+| T-005 | `serialized_struct/src/lib.rs` (crate doc test) | `compile_fail` block on `type Index = usize` |
+| T-006 | `serialized_struct_derive/src/lib.rs` (unit tests) | `expands_named_tuple_and_unit_structs`, `serialized_struct_rejects_enums`, `encode_raw_rejects_enums`, `decode_raw_rejects_unions` |
+| T-007 | Workspace (`cargo test` in each crate) and shell check | all |
 
 #### Test results
 
 | Test ID | Date of run | Git hash | Status |
 |---|---|---|---|
-| T-001 | — | — | ⏳ Not run |
-| T-002 | — | — | ⏳ Not run |
-| T-003 | — | — | ⏳ Not run |
-| T-004 | — | — | ⏳ Not run |
-| T-005 | — | — | ⏳ Not run |
-| T-006 | — | — | ⏳ Not run |
+| T-001 | 2026-11-25 | `6fc4c4d` | ✅ Success |
+| T-002 | 2026-11-25 | `6fc4c4d` | ✅ Success |
+| T-003 | 2026-11-25 | `6fc4c4d` | ✅ Success |
+| T-004 | 2026-11-25 | `6fc4c4d` | ✅ Success |
+| T-005 | 2026-11-25 | `6fc4c4d` | ✅ Success |
+| T-006 | 2026-11-25 | `6fc4c4d` | ✅ Success |
+| T-007 | 2026-11-25 | `6fc4c4d` | ✅ Success |
 
 #### Notes
 
-- None.
+- Commands: `cargo test` in `serialized_struct_derive/` (7 unit tests);
+  `cargo test --all-features` in `serialized_struct/` (16 tests, including
+  the `trybuild` run and 3 `compile_fail` doc tests); `cargo test` in
+  `rust_serial_file/` (202) and `rust_python_file/` (7); `cargo clippy
+  --all-targets` clean in the touched crates (the one `rust_python_file`
+  warning, `needless_range_loop` in `src/file/mod.rs`, predates this work).
+- The expected compiler output is stored in `serialized_struct/tests/ui/*.stderr`;
+  regenerate with `TRYBUILD=overwrite cargo test --features derive --test compile_fail`
+  after an intended message change.
 
 #### Warning notes
 
@@ -238,34 +245,40 @@ const SIZE: usize = <u64 as SerializedStruct>::SIZE + <u64 as SerializedStruct>:
 
 ### Acceptance criteria
 
-1. A derived struct with `usize`/`isize` fields has the same `SIZE` and bytes
-   on `wasm32` and on x86_64.
-2. Existing 64-bit data is read unchanged.
-3. Out-of-range values are reported, never truncated.
-4. `cargo fmt`, `cargo clippy`, build and tests pass.
+1. A derived struct with a `usize`/`isize` field does not compile, and the
+   error says why and what to do.
+2. Structs without such fields are unchanged.
+3. `cargo fmt`, `cargo clippy`, build and tests pass.
 
 ## Code coverage
 
-- **Coverage summary:** Not run yet.
+- **Coverage summary:** 96.28% of lines. The only uncovered code is the three
+  `#[proc_macro_derive]` entry points.
 
 ### Current coverage results
 
-- **Tool and command:** `cargo llvm-cov --summary-only` (planned)
-- **Date of run:** —
-- **Git hash:** —
+- **Tool and command:** `cargo llvm-cov --summary-only` (cargo-llvm-cov 0.9.2) in `serialized_struct_derive/`
+- **Date of run:** 2026-11-25
+- **Git hash:** `6fc4c4d`
 
 | File name | Function coverage | Line coverage | Region coverage | Branch coverage |
 |---|---|---|---|---|
-| `serialized_struct_derive/src/lib.rs` | — | — | — | — |
+| `serialized_struct_derive/src/lib.rs` | 90.62% (29/32) | 96.28% (233/242) | 96.69% (438/453) | N/A |
 
 ### Coverage notes
 
-- Not run yet. Proc-macro code runs at compile time; coverage of it is
-  measured through the helper's unit tests.
+- **`serialized_struct_derive/src/lib.rs`:** `derive_encode_raw`,
+  `derive_decode_raw` and `derive_serialized_struct` (3 functions, 9 lines)
+  are not covered. They take a `proc_macro::TokenStream`, which only exists
+  while the compiler runs a macro, so unit tests cannot call them; when the
+  compiler runs them for other crates' tests, coverage is not recorded. They
+  only parse the input and call the `expand_*` functions, which are covered.
+  Branch coverage is `N/A` (needs a nightly toolchain).
 
 ## Out of scope
 
-- Changing the width of the primitive `usize`/`isize` implementations used
-  outside the derive (for example `StructFile<usize>`). Decision: Olographik.
-- Detecting `usize` through type aliases or inside generic types.
-- A field attribute to opt out (keep native width). Can be added if needed.
+- Widening `usize`/`isize` to 64 bits automatically (the revision 0.1 design),
+  rejected in revision 0.3.
+- A field attribute to choose a stored width for a `usize` field (for example
+  `#[serialized(as = "u64")]`). Could be added later if hand-written
+  implementations become common. Decision: Olographik.

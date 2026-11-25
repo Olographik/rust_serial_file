@@ -2,7 +2,7 @@
 
 - **Date:** 2026-11-25
 - **Author:** `Olographik`
-- **Revision:** 0.3
+- **Revision:** 0.4
 - **Short description:** Extract the `serialized_struct` module of `rust_serial_file` into its own dependency-light crate that builds for `wasm32-unknown-unknown`, so browser code and the host server can share record definitions without pulling `utils` or `rand`.
 
 ## Table of contents
@@ -51,6 +51,7 @@ user of `rust_serial_file::serialized_struct`.
 |---|---|---|---|
 | 0.2 | 2026-11-25 | Olographik | Modified `SSC-SST-DS-002` (derived `usize`/`isize` fields are 64-bit, see `serialized_struct_derive/doc/requirements/pointer_sized_fields.md`). Added `SSC-SST-FR-008` (`BlobRef` handle type for dynamic storage) and tests T-008, T-009. Out of scope updated. |
 | 0.3 | 2026-11-25 | Olographik | Implementation done (P-001 to P-005): checklist, test results, coverage and implementation reflection filled in. Crate name `serialized_struct` confirmed. P-003 completion criteria no longer include T-009, which needs the derive change of `pointer_sized_fields.md`. No requirement changed. |
+| 0.4 | 2026-11-25 | Olographik | `usize`/`isize` are no longer encodable: modified `SSC-SST-FR-002` (removed from the primitive implementations) and `SSC-SST-DS-002` (rejected instead of target-width; see `pointer_sized_fields.md` revision 0.3). T-009 redefined as compile-fail checks and run. All tests re-run on `6fc4c4d`; T-007 now passes, since `rust_python_file` tests link (pyo3 `extension-module` made opt-in, see `rust_python_file/doc/requirements/file/example.md`). Notes, warning notes, coverage and reflection updated. |
 
 ## Goals and scope
 
@@ -100,7 +101,7 @@ user of `rust_serial_file::serialized_struct`.
 | ID | Requirement | Revision |
 |---|---|---|
 | `SSC-SST-FR-001` | A new workspace crate named `serialized_struct` shall provide `EncodeRaw`, `DecodeRaw` and `SerializedStruct` at its crate root, with the same definitions and default methods as the current module. | 0.1 |
-| `SSC-SST-FR-002` | The crate shall implement the three traits for `u8`, `u16`, `u32`, `u64`, `u128`, `usize`, `i8`, `i16`, `i32`, `i64`, `i128`, `isize`, `f32` and `f64`, as today. | 0.1 |
+| `SSC-SST-FR-002` | The crate shall implement the three traits for `u8`, `u16`, `u32`, `u64`, `u128`, `i8`, `i16`, `i32`, `i64`, `i128`, `f32` and `f64`. It shall not implement them for `usize` or `isize`. | 0.4 |
 | `SSC-SST-FR-003` | The crate shall build with `cargo build --target wasm32-unknown-unknown`, with default features and with the `derive` feature. | 0.1 |
 | `SSC-SST-FR-004` | `rust_serial_file` shall depend on the new crate and expose it as `rust_serial_file::serialized_struct` (`pub use serialized_struct;`), so the trait paths used today stay valid. | 0.1 |
 | `SSC-SST-FR-005` | `rust_serial_file/src/serialized_struct/` shall be removed; there shall be a single definition of each trait in the workspace, so a type implementing the traits through one path is accepted by APIs using the other path. | 0.1 |
@@ -113,7 +114,7 @@ user of `rust_serial_file::serialized_struct`.
 | ID | Requirement | Revision |
 |---|---|---|
 | `SSC-SST-DS-001` | Encoded bytes for every primitive and every derived struct shall be identical before and after the split (little-endian, fields in declaration order, no padding). | 0.1 |
-| `SSC-SST-DS-002` | `usize` and `isize` are 4 bytes on `wasm32` and 8 bytes on 64-bit hosts. Fields of these types in a struct using the derive are always stored as 64-bit values (`PSF-SSD-FR-001` to `PSF-SSD-FR-006`), so derived structs have the same layout on both sides. The primitive implementations used directly (for example `StructFile<usize>`) keep the native width, and the crate documentation shall say so. | 0.2 |
+| `SSC-SST-DS-002` | `usize` and `isize` are 4 bytes on `wasm32` and 8 bytes on 64-bit hosts, so they shall not be encodable: they do not implement the traits (`SSC-SST-FR-002`) and the derives reject fields of these types at compile time (`PSF-SSD-FR-001` to `PSF-SSD-FR-004`). The crate documentation shall explain this and point to fixed-width types or hand-written implementations. | 0.4 |
 | `SSC-SST-DS-003` | Checked methods `try_encode`/`try_decode` shall keep reporting buffers shorter than `SIZE` as errors, as specified in `encode_decode_raw.md`. | 0.1 |
 
 ### Rust-specific requirements
@@ -235,9 +236,12 @@ pub struct Sample { pub time: u64, pub value: f64 }
   its IDs unchanged.
 - `BlobRef` implements the traits by hand: the derive emits
   `serialized_struct::…`, which does not resolve inside the crate itself.
-- P-003 criteria changed: T-009 checks the 64-bit layout of derived
-  `usize`/`isize` fields, which only exists after the derive change. It stays
-  ⏳ Not run here and is run with `pointer_sized_fields.md` P-002.
+- P-003 criteria changed: T-009 checked the 64-bit layout of derived
+  `usize`/`isize` fields, which only existed after the derive change. In
+  revision 0.4 the owner chose to reject these types instead; T-009 became a
+  compile-fail check and passes.
+- Revision 0.4: `usize`/`isize` implementations removed. Nothing in the
+  workspace used them as records.
 - `rust_serial_file` still pulls `rand` through `utils`; this is removed by
   `utils/doc/requirements/performance/random_injection.md`, not here. The
   browser client is unblocked anyway, since it no longer needs
@@ -257,7 +261,7 @@ pub struct Sample { pub time: u64, pub value: f64 }
 | T-006 | `SSC-SST-FR-003`, `SSC-SST-RS-002` | `cargo build -p serialized_struct --target wasm32-unknown-unknown` (default and `--features derive`) and `cargo tree` check. | Both builds succeed; `rand`, `getrandom`, `utils` absent from the tree. |
 | T-007 | `SSC-SST-FR-004` | Build and test `rust_serial_file` and `rust_python_file` (`cargo test`). | All existing tests pass without source changes in tests other than moved files. |
 | T-008 | `SSC-SST-FR-008` | `BlobRef` round trip and golden bytes; `BlobRef::EMPTY.is_empty()`. | `SIZE == 12`; bytes are offset then len, little-endian. |
-| T-009 | `SSC-SST-DS-002` | Derived struct with a `usize` field built for `wasm32-unknown-unknown` with a `const` assertion on `SIZE`. | Same `SIZE` as on the host. |
+| T-009 | `SSC-SST-FR-002`, `SSC-SST-DS-002` | `compile_fail` doc tests: `usize` and `isize` used as `SerializedStruct`; `trybuild` tests of derived structs with such fields (`pointer_sized_fields.md` T-002 to T-004). | None of them compiles. |
 
 #### Test location
 
@@ -271,29 +275,33 @@ pub struct Sample { pub time: u64, pub value: f64 }
 | T-006 | Shell check (documented command) | `wasm32 build + cargo tree` |
 | T-007 | Workspace (`cargo test` in each crate) | all |
 | T-008 | `serialized_struct/tests/blob_ref.rs` | `blob_ref_layout` |
-| T-009 | `serialized_struct/tests/derive.rs` | `pointer_sized_layout_is_target_independent` |
+| T-009 | `serialized_struct/src/lib.rs` (crate doc tests), `serialized_struct/tests/compile_fail.rs` | `compile_fail` blocks, `pointer_sized_fields_are_rejected` |
 
 #### Test results
 
 | Test ID | Date of run | Git hash | Status |
 |---|---|---|---|
-| T-001 | 2026-11-25 | `daba46e` | ✅ Success |
-| T-002 | 2026-11-25 | `daba46e` | ✅ Success |
-| T-003 | 2026-11-25 | `daba46e` | ✅ Success |
-| T-004 | 2026-11-25 | `daba46e` | ✅ Success |
-| T-005 | 2026-11-25 | `daba46e` | ✅ Success |
-| T-006 | 2026-11-25 | `daba46e` | ✅ Success |
-| T-007 | 2026-11-25 | `daba46e` | ⚠️ Mitigate |
-| T-008 | 2026-11-25 | `daba46e` | ✅ Success |
-| T-009 | — | — | ⏳ Not run |
+| T-001 | 2026-11-25 | `6fc4c4d` | ✅ Success |
+| T-002 | 2026-11-25 | `6fc4c4d` | ✅ Success |
+| T-003 | 2026-11-25 | `6fc4c4d` | ✅ Success |
+| T-004 | 2026-11-25 | `6fc4c4d` | ✅ Success |
+| T-005 | 2026-11-25 | `6fc4c4d` | ✅ Success |
+| T-006 | 2026-11-25 | `6fc4c4d` | ✅ Success |
+| T-007 | 2026-11-25 | `6fc4c4d` | ✅ Success |
+| T-008 | 2026-11-25 | `6fc4c4d` | ✅ Success |
+| T-009 | 2026-11-25 | `6fc4c4d` | ✅ Success |
 
 #### Notes
 
-- Commands: `cargo test --all-features` in `serialized_struct/` (T-001,
-  T-002, T-005, T-008; T-002 also runs `tests/derive_feature.rs` with the
-  `derive` feature), `cargo test` in `rust_serial_file/` (T-003, T-004,
-  T-007: all 202 tests, including doc tests, pass), `cargo fmt --check` and
-  `cargo clippy --all-targets --all-features` clean in both crates.
+- Commands (re-run on `6fc4c4d`): `cargo test --all-features` in
+  `serialized_struct/` (16 tests: T-001, T-002, T-005, T-008, T-009, the
+  `derive` feature test and the `trybuild` compile-fail run), `cargo test` in
+  `rust_serial_file/` (T-003, T-004, T-007: 202 tests, including doc tests)
+  and in `rust_python_file/` (T-007: 7 tests). `cargo fmt --check` and
+  `cargo clippy --all-targets --all-features` clean in `serialized_struct` and
+  `rust_serial_file`.
+- T-001: the `usize`/`isize` round trips and size checks were removed from
+  `serialized_struct_raw.rs` with the implementations (revision 0.4).
 - T-005: the golden bytes are written out by hand from the little-endian
   rules; the encoder code is the pre-split code moved unchanged, so the
   bytes are those produced before the split.
@@ -303,17 +311,14 @@ pub struct Sample { pub time: u64, pub value: f64 }
   `cargo tree --target wasm32-unknown-unknown -e normal --features derive`
   lists only `anyhow` and `serialized_struct_derive` (and its proc-macro
   dependencies).
-- T-009: not run yet; see the implementation reflection.
+- T-007: on `daba46e`, `rust_python_file` test binaries did not link (pyo3
+  `extension-module` linked no libpython). Fixed on `b9e5eb5` by making that
+  feature opt-in; `rust_python_file` `cargo test` must not use
+  `--all-features`, which turns it back on.
 
 #### Warning notes
 
-- **T-007:** `rust_python_file` builds (`cargo build`), but `cargo test`
-  fails to link its test binary. The same failure happens on the code before
-  this change: the `pyo3` `extension-module` feature does not link libpython,
-  so test executables have unresolved Python symbols. Impact: none on these
-  requirements (the crate compiles against the re-export). Possible
-  resolution: make `extension-module` an optional feature enabled only by
-  `maturin`, so `cargo test` links libpython; to be decided by Olographik.
+- None.
 
 ### Acceptance criteria
 
@@ -331,7 +336,7 @@ pub struct Sample { pub time: u64, pub value: f64 }
 
 - **Tool and command:** `cargo llvm-cov --all-features --summary-only` (cargo-llvm-cov 0.9.2) in `serialized_struct/`
 - **Date of run:** 2026-11-25
-- **Git hash:** `daba46e`
+- **Git hash:** `6fc4c4d`
 
 | File name | Function coverage | Line coverage | Region coverage | Branch coverage |
 |---|---|---|---|---|
@@ -348,7 +353,7 @@ pub struct Sample { pub time: u64, pub value: f64 }
   `anyhow` default features off. Decision: owner of the repository.
 - Variable-length (dynamic) data inside `SerializedStruct` itself; only the
   `BlobRef` handle lives here, the storage is in `rust_serial_file`.
-- Changing the width of the primitive `usize`/`isize` implementations used
-  outside the derive. Decision: Olographik.
+- A portable built-in encoding for `usize`/`isize`: rejected in revision 0.4
+  (they do not compile instead).
 - A Cargo workspace root (`Cargo.toml` with `[workspace]`) for the repository;
   the crates stay independent as today.
