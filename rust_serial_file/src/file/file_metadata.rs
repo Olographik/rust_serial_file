@@ -1,7 +1,7 @@
 use std::{
     fs::{File, OpenOptions},
     io::{self, Read, Seek, SeekFrom, Write},
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 #[cfg(unix)]
@@ -16,6 +16,7 @@ const COPY_BUFFER_SIZE: usize = 64 * 1024;
 /// A fixed-width row view over a file with an optional leading metadata prefix.
 pub struct FileMetadata {
     file: File,
+    path: Option<PathBuf>,
     element_size: u64,
     data_offset: u64,
     element_count: u64,
@@ -36,6 +37,7 @@ impl FileMetadata {
 
         Ok(Self {
             file,
+            path: None,
             element_size,
             data_offset,
             element_count,
@@ -60,7 +62,21 @@ impl FileMetadata {
             .open(path.as_ref())
             .with_context(|| format!("failed to open or create {}", path.as_ref().display()))?;
 
-        Self::new(file, element_size, data_offset)
+        let mut metadata = Self::new(file, element_size, data_offset)?;
+        metadata.path = Some(path.as_ref().to_owned());
+        Ok(metadata)
+    }
+
+    /// The path the file was opened from: set by
+    /// [`open_or_create`](Self::open_or_create) (and by `FileAtlas`), `None`
+    /// for a [`new`](Self::new) handle. Only used to locate files, for
+    /// example by blob compaction; it is not checked against the file.
+    pub fn path(&self) -> Option<&Path> {
+        self.path.as_deref()
+    }
+
+    pub(crate) fn set_path(&mut self, path: PathBuf) {
+        self.path = Some(path);
     }
 
     pub fn file_len(&self) -> Result<u64> {
@@ -527,7 +543,7 @@ fn read_at(_file: &File, _buffer: &mut [u8], _offset: u64) -> io::Result<usize> 
     ))
 }
 
-fn read_exact_at(file: &File, mut buffer: &mut [u8], offset: u64) -> io::Result<()> {
+pub(super) fn read_exact_at(file: &File, mut buffer: &mut [u8], offset: u64) -> io::Result<()> {
     let mut position = offset;
     while !buffer.is_empty() {
         match read_at(file, buffer, position) {
