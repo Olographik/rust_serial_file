@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use rust_serial_file::{
     adapter::{abstract_serial_read::SerialDataReader, abstract_serial_write::SerialDataWriter},
     file::struct_file::StructFile,
-    serialized_struct::{EncodeRaw, SerializedStruct},
+    serialized_struct::SerializedStruct,
 };
 
 use crate::{
@@ -22,24 +22,18 @@ const FILE_NAME: &str = "samples.bin";
 /// `StructFile<Sample>` in `<directory>/samples.bin`, without a metadata
 /// prefix.
 pub struct SerialStore {
-    /// Always `Some` between operations; taken only while a batch is
-    /// appended through the raw `FileMetadata` block write.
-    file: Option<StructFile<Sample>>,
+    file: StructFile<Sample>,
     path: PathBuf,
     profile: Profile,
 }
 
 impl SerialStore {
     fn file(&self) -> &StructFile<Sample> {
-        self.file
-            .as_ref()
-            .expect("the struct file is always present")
+        &self.file
     }
 
     fn file_mut(&mut self) -> &mut StructFile<Sample> {
-        self.file
-            .as_mut()
-            .expect("the struct file is always present")
+        &mut self.file
     }
 
     fn sync_if_durable(&mut self) -> Result<()> {
@@ -52,31 +46,10 @@ impl SerialStore {
     fn open_path(path: PathBuf, profile: Profile) -> Result<Self> {
         let file = StructFile::open_or_create(&path, 0)?;
         Ok(Self {
-            file: Some(file),
+            file,
             path,
             profile,
         })
-    }
-
-    /// Appends one block of encoded rows with a single positioned write.
-    fn append_block(&mut self, samples: &[Sample], buffer: &mut Vec<u8>) -> Result<()> {
-        buffer.clear();
-        buffer.resize(samples.len() * Sample::SIZE, 0);
-        for (sample, row) in samples.iter().zip(buffer.chunks_exact_mut(Sample::SIZE)) {
-            sample.encode(row);
-        }
-        // `StructFile` has no block append, so append through its metadata
-        // and wrap it again (one length read per batch).
-        let mut metadata = self
-            .file
-            .take()
-            .expect("the struct file is always present")
-            .into_file_metadata();
-        let result = metadata
-            .element_count()
-            .and_then(|start| metadata.write_rows(start, buffer));
-        self.file = Some(StructFile::new(metadata)?);
-        result
     }
 }
 
@@ -106,9 +79,9 @@ impl Store for SerialStore {
     }
 
     fn append_batches(&mut self, samples: &[Sample], batch: usize) -> Result<()> {
-        let mut buffer = Vec::new();
         for chunk in samples.chunks(batch.max(1)) {
-            self.append_block(chunk, &mut buffer)?;
+            let end = self.file.serial_len();
+            self.file.write_multiple(end, chunk)?;
             self.sync_if_durable()?;
         }
         Ok(())

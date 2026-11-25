@@ -191,9 +191,44 @@ impl<T: SerializedStruct, M: BorrowMut<FileMetadata>> StructFile<T, M> {
         })
     }
 
-    /// Encodes records in slice order, replacing from row zero and appending
-    /// any suffix beyond the current collection.
-    pub fn write_multiple(&mut self, values: &[T]) -> Result<()> {
+    /// Encodes `values` in slice order and writes them at rows
+    /// `start..start + values.len()`: existing rows in that range are
+    /// replaced and the rest is appended. Rows before `start` and after the
+    /// written range are unchanged. Records are not sorted or checked.
+    ///
+    /// `start == serial_len()` appends a batch; `start == 0` rewrites from
+    /// the first row.
+    ///
+    /// ```
+    /// use rust_serial_file::{
+    ///     adapter::abstract_serial_read::SerialDataReader, file::struct_file::StructFile,
+    /// };
+    ///
+    /// # fn main() -> anyhow::Result<()> {
+    /// # let directory = tempfile::tempdir()?;
+    /// let mut file = StructFile::<u32>::open_or_create(directory.path().join("rows.bin"), 0)?;
+    /// let records: Vec<u32> = (0..2_500).collect();
+    /// for batch in records.chunks(1_000) {
+    ///     let end = file.serial_len();
+    ///     file.write_multiple(end, batch)?;
+    /// }
+    /// assert_eq!(file.serial_len(), 2_500);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Fails, writing nothing, if `start` is greater than the current
+    /// length (the write would leave a gap), or on an encoding, allocation,
+    /// overflow or I/O error.
+    pub fn write_multiple(&mut self, start: usize, values: &[T]) -> Result<()> {
+        if start > self.len {
+            bail!(
+                "write start {start} is beyond the end of the {} records",
+                self.len
+            );
+        }
         if values.is_empty() {
             return Ok(());
         }
@@ -204,9 +239,12 @@ impl<T: SerializedStruct, M: BorrowMut<FileMetadata>> StructFile<T, M> {
             .context("encoded block byte length overflow")?;
         let row_count =
             u64::try_from(values.len()).context("record count does not fit in file row index")?;
-        let new_len =
+        let written =
             usize::try_from(row_count).context("record count does not fit in collection length")?;
-        let new_len = self.len.max(new_len);
+        let end = start
+            .checked_add(written)
+            .context("write range end overflow")?;
+        let new_len = self.len.max(end);
         let mut rows = allocate_bytes(byte_len, "encoded record block")?;
 
         for (index, value) in values.iter().enumerate() {
@@ -225,7 +263,8 @@ impl<T: SerializedStruct, M: BorrowMut<FileMetadata>> StructFile<T, M> {
             }
         }
 
-        self.file_metadata_mut().write_rows(0, &rows)?;
+        self.file_metadata_mut()
+            .write_rows(to_file_index(start)?, &rows)?;
         self.len = new_len;
         Ok(())
     }

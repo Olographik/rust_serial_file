@@ -240,7 +240,7 @@ fn rejects_incorrect_encoded_length() {
 
     assert!(file.write_value_at(0, &IncorrectEncoder).is_err());
     assert_eq!(read_file(&path), [7]);
-    assert!(file.write_multiple(&[IncorrectEncoder]).is_err());
+    assert!(file.write_multiple(0, &[IncorrectEncoder]).is_err());
     assert_eq!(read_file(&path), [7]);
 }
 
@@ -252,7 +252,7 @@ fn encode_errors_do_not_change_collection_length() {
     assert!(file.serial_write(FailingEncoder).is_err());
     assert_eq!(file.serial_len(), 1);
     assert_eq!(read_file(&path), [7]);
-    assert!(file.write_multiple(&[FailingEncoder]).is_err());
+    assert!(file.write_multiple(1, &[FailingEncoder]).is_err());
     assert_eq!(file.serial_len(), 1);
     assert_eq!(read_file(&path), [7]);
 }
@@ -525,42 +525,90 @@ fn read_file_from_metadata(metadata: FileMetadata) -> Vec<u8> {
 
 #[test]
 fn write_multiple_replaces_and_appends_in_slice_order() {
-    let initial = [record(4), record(5), record(6)];
-    let (_directory, _path, mut file) = struct_file(&encoded(&initial));
-
-    file.write_multiple(&[record(2)]).unwrap();
-    assert_eq!(file.serial_len(), 3);
-    assert_eq!(
-        file.serial_iter()
-            .unwrap()
-            .map(|value| value.unwrap())
-            .collect::<Vec<_>>(),
-        [record(2), record(5), record(6)]
-    );
-
-    file.write_multiple(&[record(10), record(11), record(12)])
-        .unwrap();
-    assert_eq!(file.serial_len(), 3);
-    assert_eq!(
-        file.serial_iter()
-            .unwrap()
-            .map(|value| value.unwrap())
-            .collect::<Vec<_>>(),
-        [record(10), record(11), record(12)]
-    );
-
-    file.write_multiple(&[record(8), record(7), record(9), record(3)])
-        .unwrap();
-    assert_eq!(file.serial_len(), 4);
-    assert_eq!(
+    let collect = |file: &StructFile<Record>| {
         file.serial_iter()
             .unwrap()
             .map(Result::unwrap)
-            .collect::<Vec<_>>(),
-        [record(8), record(7), record(9), record(3)]
-    );
-    file.write_multiple(&[]).unwrap();
+            .collect::<Vec<_>>()
+    };
+    let initial = [record(4), record(5), record(6)];
+    let (_directory, _path, mut file) = struct_file(&encoded(&initial));
+
+    // From row 0: shorter than, equal to, and longer than the collection.
+    file.write_multiple(0, &[record(2)]).unwrap();
+    assert_eq!(file.serial_len(), 3);
+    assert_eq!(collect(&file), [record(2), record(5), record(6)]);
+
+    file.write_multiple(0, &[record(10), record(11), record(12)])
+        .unwrap();
+    assert_eq!(file.serial_len(), 3);
+    assert_eq!(collect(&file), [record(10), record(11), record(12)]);
+
+    file.write_multiple(0, &[record(8), record(7), record(9), record(3)])
+        .unwrap();
     assert_eq!(file.serial_len(), 4);
+    assert_eq!(collect(&file), [record(8), record(7), record(9), record(3)]);
+
+    // A middle start inside the collection: rows around it are unchanged.
+    file.write_multiple(1, &[record(20), record(21)]).unwrap();
+    assert_eq!(file.serial_len(), 4);
+    assert_eq!(
+        collect(&file),
+        [record(8), record(20), record(21), record(3)]
+    );
+
+    // A middle start overlapping the end: the excess is appended.
+    file.write_multiple(3, &[record(30), record(31), record(32)])
+        .unwrap();
+    assert_eq!(file.serial_len(), 6);
+    assert_eq!(
+        collect(&file),
+        [
+            record(8),
+            record(20),
+            record(21),
+            record(30),
+            record(31),
+            record(32)
+        ]
+    );
+
+    // At the end: a batch append.
+    file.write_multiple(6, &[record(40)]).unwrap();
+    assert_eq!(file.serial_len(), 7);
+    assert_eq!(file.serial_get(6).unwrap(), record(40));
+
+    // Empty slices change nothing, at any start up to the length.
+    let before = collect(&file);
+    file.write_multiple(0, &[]).unwrap();
+    file.write_multiple(7, &[]).unwrap();
+    assert_eq!(collect(&file), before);
+}
+
+#[test]
+fn write_multiple_rejects_gaps_and_appends_batches() {
+    let initial = [record(1), record(2)];
+    let (_directory, path, mut file) = struct_file(&encoded(&initial));
+    let before = read_file(&path);
+    for values in [&[record(3)][..], &[]] {
+        let error = file.write_multiple(3, values).unwrap_err();
+        assert!(error.to_string().contains("beyond the end"), "{error}");
+        assert_eq!(file.serial_len(), 2);
+        assert_eq!(read_file(&path), before);
+    }
+
+    // Ten batch appends give the same file as one write of all records.
+    let records: Vec<Record> = (0..100).map(record).collect();
+    let (_batched_directory, batched_path, mut batched) = struct_file(&[]);
+    for batch in records.chunks(10) {
+        let end = batched.serial_len();
+        batched.write_multiple(end, batch).unwrap();
+    }
+    let (_single_directory, single_path, mut single) = struct_file(&[]);
+    single.write_multiple(0, &records).unwrap();
+    assert_eq!(batched.serial_len(), 100);
+    assert_eq!(read_file(&batched_path), read_file(&single_path));
+    assert_eq!(read_file(&single_path), encoded(&records));
 }
 
 /// Reads a `StructFile` through a shared reference only.
