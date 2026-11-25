@@ -1,7 +1,7 @@
 # Random Generator Injection Requirements
 
 - **Date:** 2026-11-25
-- **Author:** `Claude`
+- **Author:** `Olographik`
 - **Revision:** 0.1
 - **Short description:** Let callers of the `utils` performance `Tester` inject their own random generator, and make `rand` an optional dependency so `utils` (and crates depending on it) can build for WebAssembly.
 

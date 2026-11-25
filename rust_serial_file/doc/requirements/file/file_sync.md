@@ -1,7 +1,7 @@
 # File Sync Requirements
 
 - **Date:** 2026-11-25
-- **Author:** `Claude`
+- **Author:** `Olographik`
 - **Revision:** 0.1
 - **Short description:** Add explicit durability points (`sync_data` / `sync_all`) to `FileMetadata`, `BufferedWriter`, `StructFile`, `FileLock` and `FileAtlas`, so callers can persist written rows without closing the file.
 

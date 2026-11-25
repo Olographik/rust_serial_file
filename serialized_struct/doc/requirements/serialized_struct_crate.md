@@ -1,8 +1,8 @@
 # Serialized Struct Crate Requirements
 
 - **Date:** 2026-11-25
-- **Author:** `Claude`
-- **Revision:** 0.1
+- **Author:** `Olographik`
+- **Revision:** 0.2
 - **Short description:** Extract the `serialized_struct` module of `rust_serial_file` into its own dependency-light crate that builds for `wasm32-unknown-unknown`, so browser code and the host server can share record definitions without pulling `utils` or `rand`.
 
 ## Table of contents
@@ -49,6 +49,7 @@ user of `rust_serial_file::serialized_struct`.
 
 | Revision | Date | Author | Changes |
 |---|---|---|---|
+| 0.2 | 2026-11-25 | Olographik | Modified `SSC-SST-DS-002` (derived `usize`/`isize` fields are 64-bit, see `serialized_struct_derive/doc/requirements/pointer_sized_fields.md`). Added `SSC-SST-FR-008` (`BlobRef` handle type for dynamic storage) and tests T-008, T-009. Out of scope updated. |
 
 ## Goals and scope
 
@@ -104,13 +105,14 @@ user of `rust_serial_file::serialized_struct`.
 | `SSC-SST-FR-005` | `rust_serial_file/src/serialized_struct/` shall be removed; there shall be a single definition of each trait in the workspace, so a type implementing the traits through one path is accepted by APIs using the other path. | 0.1 |
 | `SSC-SST-FR-006` | An optional cargo feature `derive` shall re-export the `SerializedStruct` derive macro from `serialized_struct_derive`, so a browser project can write `use serialized_struct::SerializedStruct;` and get both the trait and the derive. | 0.1 |
 | `SSC-SST-FR-007` | A struct deriving `SerializedStruct` shall compile when the user imports the traits through either `serialized_struct` (new crate) or `rust_serial_file::serialized_struct` (re-export). | 0.1 |
+| `SSC-SST-FR-008` | The crate shall provide `BlobRef { offset: u64, len: u32 }`, a 12-byte `SerializedStruct` (offset then length, little-endian) used as a record field pointing into a blob file (`rust_serial_file/doc/requirements/file/dynamic_storage.md`). `BlobRef::EMPTY` (`offset = 0`, `len = 0`) means an empty value with no storage. It holds no I/O, so records using it still build for WebAssembly. | 0.2 |
 
 ### Data and serialization
 
 | ID | Requirement | Revision |
 |---|---|---|
 | `SSC-SST-DS-001` | Encoded bytes for every primitive and every derived struct shall be identical before and after the split (little-endian, fields in declaration order, no padding). | 0.1 |
-| `SSC-SST-DS-002` | `usize` and `isize` are 4 bytes on `wasm32` and 8 bytes on 64-bit hosts. The crate documentation shall state that records exchanged between the browser and the host must not use `usize`/`isize` fields, because `SIZE` and the byte layout differ between the two sides. | 0.1 |
+| `SSC-SST-DS-002` | `usize` and `isize` are 4 bytes on `wasm32` and 8 bytes on 64-bit hosts. Fields of these types in a struct using the derive are always stored as 64-bit values (`PSF-SSD-FR-001` to `PSF-SSD-FR-006`), so derived structs have the same layout on both sides. The primitive implementations used directly (for example `StructFile<usize>`) keep the native width, and the crate documentation shall say so. | 0.2 |
 | `SSC-SST-DS-003` | Checked methods `try_encode`/`try_decode` shall keep reporting buffers shorter than `SIZE` as errors, as specified in `encode_decode_raw.md`. | 0.1 |
 
 ### Rust-specific requirements
@@ -197,7 +199,7 @@ pub struct Sample { pub time: u64, pub value: f64 }
 |---|---|---|---|
 | P-001 | **Create the crate:** add `serialized_struct/` (`Cargo.toml`, `src/lib.rs`) with the content of the current module, move `tests/serialized_struct_raw.rs` into it, add the `derive` feature. | None | `cargo test -p serialized_struct` passes; the crate has no dependency other than `anyhow` (and optional derive). |
 | P-002 | **Switch `rust_serial_file`:** add the dependency, replace `mod serialized_struct` by `pub use serialized_struct;`, delete the old module, fix internal `crate::serialized_struct` paths. | P-001 | `rust_serial_file` and `rust_python_file` build and all their tests pass unchanged. |
-| P-003 | **WebAssembly check:** build the crate (with and without `derive`) for `wasm32-unknown-unknown`, check `cargo tree` for forbidden crates, add a test deriving a struct through each import path. | P-002 | `SSC-SST-FR-003`, `SSC-SST-FR-007` and `SSC-SST-RS-002` verified. |
+| P-003 | **WebAssembly check and `BlobRef`:** add `BlobRef`; build the crate (with and without `derive`) for `wasm32-unknown-unknown`, check `cargo tree` for forbidden crates, add a test deriving a struct through each import path. | P-002 | `SSC-SST-FR-003`, `SSC-SST-FR-007`, `SSC-SST-FR-008` and `SSC-SST-RS-002` verified (T-006, T-008, T-009). |
 | P-004 | **Coverage:** run the tests with coverage for the touched files only and record the results in [Code coverage](#code-coverage). | P-001 to P-003 | Coverage is measured for every touched file, the results are recorded, and any uncovered code is justified. |
 | P-005 | **Documentation:** update this document, move `encode_decode_raw.md` into the new crate, add crate-level docs (WebAssembly usage and the `usize` warning). | P-004 | The document matches the implemented behavior and test results; public items have up-to-date doc comments. |
 
@@ -205,7 +207,7 @@ pub struct Sample { pub time: u64, pub value: f64 }
 
 - [ ] P-001 — `Create the serialized_struct crate` — Not started
 - [ ] P-002 — `Re-export from rust_serial_file` — Not started
-- [ ] P-003 — `WebAssembly build check` — Not started
+- [ ] P-003 — `WebAssembly build check and BlobRef` — Not started
 - [ ] P-004 — `Coverage of touched files` — Not started
 - [ ] P-005 — `Documentation update` — Not started
 
@@ -240,6 +242,8 @@ pub struct Sample { pub time: u64, pub value: f64 }
 | T-005 | `SSC-SST-DS-001` | Golden bytes: encode a fixed derived struct and compare with a byte array captured before the split. | Bytes are equal. |
 | T-006 | `SSC-SST-FR-003`, `SSC-SST-RS-002` | `cargo build -p serialized_struct --target wasm32-unknown-unknown` (default and `--features derive`) and `cargo tree` check. | Both builds succeed; `rand`, `getrandom`, `utils` absent from the tree. |
 | T-007 | `SSC-SST-FR-004` | Build and test `rust_serial_file` and `rust_python_file` (`cargo test`). | All existing tests pass without source changes in tests other than moved files. |
+| T-008 | `SSC-SST-FR-008` | `BlobRef` round trip and golden bytes; `BlobRef::EMPTY.is_empty()`. | `SIZE == 12`; bytes are offset then len, little-endian. |
+| T-009 | `SSC-SST-DS-002` | Derived struct with a `usize` field built for `wasm32-unknown-unknown` with a `const` assertion on `SIZE`. | Same `SIZE` as on the host. |
 
 #### Test location
 
@@ -252,6 +256,8 @@ pub struct Sample { pub time: u64, pub value: f64 }
 | T-005 | `serialized_struct/tests/derive.rs` | `derived_layout_matches_golden_bytes` |
 | T-006 | Shell check (documented command) | `wasm32 build + cargo tree` |
 | T-007 | Workspace (`cargo test` in each crate) | all |
+| T-008 | `serialized_struct/tests/blob_ref.rs` | `blob_ref_layout` |
+| T-009 | `serialized_struct/tests/derive.rs` | `pointer_sized_layout_is_target_independent` |
 
 #### Test results
 
@@ -264,6 +270,8 @@ pub struct Sample { pub time: u64, pub value: f64 }
 | T-005 | — | — | ⏳ Not run |
 | T-006 | — | — | ⏳ Not run |
 | T-007 | — | — | ⏳ Not run |
+| T-008 | — | — | ⏳ Not run |
+| T-009 | — | — | ⏳ Not run |
 
 #### Notes
 
@@ -303,10 +311,9 @@ pub struct Sample { pub time: u64, pub value: f64 }
 
 - `no_std` support (would allow embedded targets); possible later with
   `anyhow` default features off. Decision: owner of the repository.
-- Variable-length (dynamic) data in `SerializedStruct`; handled by the
-  separate dynamic storage design, still under discussion.
-- Removing or feature-gating the `usize`/`isize` implementations. Only a
-  documentation warning is required now (`SSC-SST-DS-002`); whether to go
-  further must be decided by the repository owner.
+- Variable-length (dynamic) data inside `SerializedStruct` itself; only the
+  `BlobRef` handle lives here, the storage is in `rust_serial_file`.
+- Changing the width of the primitive `usize`/`isize` implementations used
+  outside the derive. Decision: Olographik.
 - A Cargo workspace root (`Cargo.toml` with `[workspace]`) for the repository;
   the crates stay independent as today.
