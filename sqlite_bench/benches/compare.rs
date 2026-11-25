@@ -13,7 +13,7 @@ use std::{
     time::Duration,
 };
 
-use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
+use criterion::{BatchSize, BenchmarkId, Criterion, SamplingMode, criterion_group, criterion_main};
 use sqlite_bench::{
     Profile, Store, check_same_data,
     named_store::{BlobNamedStore, NamedStore, SqliteNamedStore},
@@ -100,6 +100,10 @@ fn configure<'a>(
 ) -> criterion::BenchmarkGroup<'a, criterion::measurement::WallTime> {
     let mut group = criterion.benchmark_group(name);
     group.sample_size(10);
+    // Flat sampling: the same number of iterations in every sample. With
+    // the default linear sampling, 10 samples cost 55 iterations, which is
+    // minutes for the 1 000 000-record appends.
+    group.sampling_mode(SamplingMode::Flat);
     group.warm_up_time(Duration::from_secs(1));
     group.measurement_time(Duration::from_secs(5));
     group
