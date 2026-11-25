@@ -1,4 +1,4 @@
-use rust_serial_file::serialized_struct::{self, DecodeRaw, EncodeRaw, SerializedStruct};
+use serialized_struct::{DecodeRaw, EncodeRaw, SerializedStruct};
 
 fn assert_primitive_round_trip<T>(value: T, expected: &[u8])
 where
@@ -39,7 +39,6 @@ fn primitive_values_encode_as_little_endian_bytes() {
             0x23, 0x01,
         ],
     );
-    assert_primitive_round_trip(0x1234_usize, &0x1234_usize.to_le_bytes());
 
     assert_primitive_round_trip(-2_i8, &(-2_i8).to_le_bytes());
     assert_primitive_round_trip(-0x1234_i16, &(-0x1234_i16).to_le_bytes());
@@ -52,7 +51,6 @@ fn primitive_values_encode_as_little_endian_bytes() {
         -0x0123_4567_89AB_CDEF_0011_2233_4455_6677_i128,
         &(-0x0123_4567_89AB_CDEF_0011_2233_4455_6677_i128).to_le_bytes(),
     );
-    assert_primitive_round_trip(-0x1234_isize, &(-0x1234_isize).to_le_bytes());
 
     assert_primitive_round_trip(1.5_f32, &1.5_f32.to_le_bytes());
     assert_primitive_round_trip(-2.25_f64, &(-2.25_f64).to_le_bytes());
@@ -69,13 +67,11 @@ fn primitive_serialized_size_matches_type_width() {
     assert_size::<u32>();
     assert_size::<u64>();
     assert_size::<u128>();
-    assert_size::<usize>();
     assert_size::<i8>();
     assert_size::<i16>();
     assert_size::<i32>();
     assert_size::<i64>();
     assert_size::<i128>();
-    assert_size::<isize>();
     assert_size::<f32>();
     assert_size::<f64>();
 }

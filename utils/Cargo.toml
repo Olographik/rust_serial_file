@@ -3,5 +3,17 @@ name = "utils"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["performance", "rand"]
+# Timing helpers and `Tester` (`utils::performance`).
+performance = []
+# `rand` support: `IndexRng` for every `rand::Rng`, `Tester::execute`.
+rand = ["dep:rand"]
+
 [dependencies]
-rand = "0.10.3"
+rand = { version = "0.10.3", optional = true }
+
+[[bin]]
+name = "utils"
+path = "src/main.rs"
+required-features = ["performance", "rand"]

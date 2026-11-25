@@ -1,0 +1,11 @@
+error: #[derive(EncodeRaw)] does not support the `usize` field `len` of `Encoded`: its size depends on the target platform. Use a fixed-width type (for example `u64` or `i64`), or implement `EncodeRaw`, `DecodeRaw` and `SerializedStruct` by hand for this struct.
+ --> tests/ui/raw_derives_usize.rs:5:10
+  |
+5 |     len: usize,
+  |          ^^^^^
+
+error: #[derive(DecodeRaw)] does not support the `isize` field `offset` of `Decoded`: its size depends on the target platform. Use a fixed-width type (for example `u64` or `i64`), or implement `EncodeRaw`, `DecodeRaw` and `SerializedStruct` by hand for this struct.
+  --> tests/ui/raw_derives_usize.rs:10:13
+   |
+10 |     offset: isize,
+   |             ^^^^^

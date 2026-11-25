@@ -2,12 +2,13 @@
 
 - **Date:** 2026-11-08
 - **Author:** `Olographik`
-- **Revision:** 0.1
+- **Revision:** 0.3
 - **Short description:** Expose raw little-endian `EncodeRaw` and `DecodeRaw` traits and provide opt-in checked encode/decode methods for fixed-layout serialized values.
 
 ## Table of contents
 
 - [Overview](#overview)
+- [Revisions](#revisions)
 - [Goals and scope](#goals-and-scope)
 - [Assumptions and dependencies](#assumptions-and-dependencies)
 - [Requirements](#requirements)
@@ -26,16 +27,32 @@
 ## Overview
 
 Specify the public raw serialization traits declared by
-`rust_serial_file/src/serialized_struct/mod.rs`. `EncodeRaw` writes a value's
+`serialized_struct/src/lib.rs` (the `serialized_struct` crate, extracted from
+`rust_serial_file/src/serialized_struct/mod.rs`; see
+[serialized_struct_crate.md](serialized_struct_crate.md)). `EncodeRaw` writes a value's
 little-endian representation into a caller-provided byte slice.
 `DecodeRaw` reconstructs a value from a byte slice and supports advancing a
 caller-owned offset when decoding sequential fields.
 
 The public crate module shall expose these traits as
 `rust_serial_file::serialized_struct::EncodeRaw` and
-`rust_serial_file::serialized_struct::DecodeRaw`. The module also contains
+`rust_serial_file::serialized_struct::DecodeRaw`. Since revision 0.2 these
+paths go through a re-export of the `serialized_struct` crate, where the same
+traits are also available as `serialized_struct::EncodeRaw` and
+`serialized_struct::DecodeRaw`. Coverage figures below predate the move and
+refer to the old file. The module also contains
 `SerializedStruct`, which composes both traits and provides a fixed-size
 constant used by other serialization components.
+
+## Revisions
+
+This document predates the requirements template; this section was added in
+revision 0.3.
+
+| Revision | Date | Author | Changes |
+|---|---|---|---|
+| 0.2 | 2026-11-25 | Olographik | Moved to the `serialized_struct` crate (see `serialized_struct_crate.md`); test paths updated. No requirement changed. |
+| 0.3 | 2026-11-25 | Olographik | Modified `RSF-FR-006` (`usize`/`isize` removed from the primitive implementations) and `RSF-DS-004` (they shall not implement the traits). Compatibility and Out of scope updated. Tests T-002 and T-004 no longer cover `usize`/`isize`. |
 
 ## Goals and scope
 
@@ -86,7 +103,7 @@ constant used by other serialization components.
 | RSF-FR-003 | `EncodeRaw::encode` shall write the receiver's little-endian bytes at the beginning of the supplied buffer and return the number of bytes written. |
 | RSF-FR-004 | `DecodeRaw::from_le_bytes_slices` shall decode one value beginning at the caller-provided offset and advance the offset by the decoded value's byte width. |
 | RSF-FR-005 | `DecodeRaw::from_le_bytes_only` shall decode from offset zero and ignore trailing bytes beyond the decoded value. |
-| RSF-FR-006 | Primitive implementations shall cover the currently supported signed and unsigned integers, pointer-sized integers, and `f32`/`f64`: `u8`, `u16`, `u32`, `u64`, `u128`, `usize`, `i8`, `i16`, `i32`, `i64`, `i128`, `isize`, `f32`, and `f64`. |
+| RSF-FR-006 | Primitive implementations shall cover the fixed-width signed and unsigned integers and `f32`/`f64`: `u8`, `u16`, `u32`, `u64`, `u128`, `i8`, `i16`, `i32`, `i64`, `i128`, `f32`, and `f64`. *(Revision 0.3: `usize` and `isize` removed.)* |
 | RSF-FR-007 | The `SerializedStruct` trait shall remain public, extend both raw traits, and expose `SIZE` for existing fixed-layout serialization consumers. |
 | RSF-FR-008 | `SerializedStruct::try_encode` shall verify the destination has at least `SIZE` bytes before calling `encode`, returning `Ok(bytes_written)` on success and `Err` for an undersized destination. |
 | RSF-FR-009 | `SerializedStruct::try_decode` shall verify the source has at least `SIZE` bytes before decoding, returning the decoded value on success and `Err` for insufficient input. Trailing bytes shall be ignored, matching `from_le_bytes_only`. |
@@ -99,7 +116,7 @@ constant used by other serialization components.
 | RSF-DS-001 | Integer and floating-point representations shall use their standard Rust little-endian byte encodings with no added header or framing bytes. |
 | RSF-DS-002 | Sequential decoding shall consume bytes in field order by updating the shared offset after each successful field decode. |
 | RSF-DS-003 | Encoded width shall match the primitive type's `size_of::<T>()`; `SerializedStruct::SIZE` for primitive implementations shall match that width. |
-| RSF-DS-004 | `usize` and `isize` use the target architecture's width. Cross-architecture persistence of pointer-sized values is not guaranteed by this interface and shall not be implied. |
+| RSF-DS-004 | `usize` and `isize` shall not implement `EncodeRaw`, `DecodeRaw` or `SerializedStruct`, because their width depends on the target and the encoded layout must be platform independent. *(Revision 0.3: replaces "`usize` and `isize` use the target architecture's width".)* |
 
 ### Rust-specific requirements
 
@@ -208,8 +225,8 @@ let decoded = MyRecord::try_decode(&input)?;
 - Public exposure through the crate root shall not require downstream callers
   to depend on a private implementation module.
 - Pointer-sized integer encoding remains architecture-width-dependent.
-- A future checked decoding API or portable representation for `usize` and
-  `isize` requires a separately reviewed compatibility change.
+- `usize` and `isize` are not encodable (`RSF-DS-004`); records that need
+  them implement the traits by hand and choose the stored width.
 
 ## Performance and resource use
 
@@ -268,13 +285,13 @@ template's required labels: **✅ Success** or **❌ Failed**.
 
 | Test ID | Requirement IDs | Description of the test | Success requirements | Test file | Test name | Status |
 |---|---|---|---|---|---|---|
-| T-001 | `RSF-FR-001`, `RSF-FR-002`, `RSF-FR-010`, `RSF-RS-004` | Compile imports of the raw traits and verify existing raw signatures remain available through the public crate path. | The public API imports compile and raw methods remain source-compatible. | `rust_serial_file/tests/serialized_struct_raw.rs` | `raw_traits_are_publicly_accessible` | ✅ Success |
-| T-002 | `RSF-FR-003`, `RSF-FR-006`, `RSF-DS-001` | Verify supported primitive values encode to expected little-endian bytes and return the expected width. | Output bytes match little-endian representations and the returned width is correct. | `rust_serial_file/tests/serialized_struct_raw.rs` | `primitive_values_encode_as_little_endian_bytes` | ✅ Success |
-| T-003 | `RSF-FR-004`, `RSF-FR-005`, `RSF-FR-006`, `RSF-DS-002` | Decode primitive values sequentially with a shared offset and verify decoding from offset zero. | Decoded values match their originals; offset advances by each encoded width; trailing bytes are ignored by `from_le_bytes_only`. | `rust_serial_file/tests/serialized_struct_raw.rs` | `primitive_values_decode_and_advance_offsets` | ✅ Success |
-| T-004 | `RSF-FR-007`, `RSF-DS-003` | Verify primitive `SerializedStruct::SIZE` matches the type width. | `SIZE == size_of::<T>()` for each supported primitive. | `rust_serial_file/tests/serialized_struct_raw.rs` | `primitive_serialized_size_matches_type_width` | ✅ Success |
-| T-005 | `RSF-FR-008`, `RSF-FR-010`, `RSF-RS-005` | Verify `try_encode` succeeds with adequate or oversized buffers and returns an error for an undersized buffer without changing the raw API. | Adequate buffers contain the expected bytes; undersized buffers return `Err` without partial output mutation. | `rust_serial_file/tests/serialized_struct_raw.rs` | `checked_encode_validates_buffer_size` | ✅ Success |
-| T-006 | `RSF-FR-009`, `RSF-FR-010`, `RSF-RS-005` | Verify `try_decode` for adequate and oversized buffers and reject undersized input. | Valid input decodes correctly, trailing bytes are ignored, and short input returns `Err` rather than panicking. | `rust_serial_file/tests/serialized_struct_raw.rs` | `checked_decode_validates_buffer_size` | ✅ Success |
-| T-007 | `RSF-FR-007`, `RSF-FR-008`, `RSF-FR-009` | Verify a derived `SerializedStruct` retains its generated implementation and inherits the checked methods. | Derived struct encodes and decodes successfully through `try_encode` and `try_decode`. | `rust_serial_file/tests/serialized_struct_raw.rs` | `derived_serialized_struct_uses_checked_methods` | ✅ Success |
+| T-001 | `RSF-FR-001`, `RSF-FR-002`, `RSF-FR-010`, `RSF-RS-004` | Compile imports of the raw traits and verify existing raw signatures remain available through the public crate path. | The public API imports compile and raw methods remain source-compatible. | `serialized_struct/tests/serialized_struct_raw.rs` | `raw_traits_are_publicly_accessible` | ✅ Success |
+| T-002 | `RSF-FR-003`, `RSF-FR-006`, `RSF-DS-001` | Verify supported primitive values encode to expected little-endian bytes and return the expected width. | Output bytes match little-endian representations and the returned width is correct. | `serialized_struct/tests/serialized_struct_raw.rs` | `primitive_values_encode_as_little_endian_bytes` | ✅ Success |
+| T-003 | `RSF-FR-004`, `RSF-FR-005`, `RSF-FR-006`, `RSF-DS-002` | Decode primitive values sequentially with a shared offset and verify decoding from offset zero. | Decoded values match their originals; offset advances by each encoded width; trailing bytes are ignored by `from_le_bytes_only`. | `serialized_struct/tests/serialized_struct_raw.rs` | `primitive_values_decode_and_advance_offsets` | ✅ Success |
+| T-004 | `RSF-FR-007`, `RSF-DS-003` | Verify primitive `SerializedStruct::SIZE` matches the type width. | `SIZE == size_of::<T>()` for each supported primitive. | `serialized_struct/tests/serialized_struct_raw.rs` | `primitive_serialized_size_matches_type_width` | ✅ Success |
+| T-005 | `RSF-FR-008`, `RSF-FR-010`, `RSF-RS-005` | Verify `try_encode` succeeds with adequate or oversized buffers and returns an error for an undersized buffer without changing the raw API. | Adequate buffers contain the expected bytes; undersized buffers return `Err` without partial output mutation. | `serialized_struct/tests/serialized_struct_raw.rs` | `checked_encode_validates_buffer_size` | ✅ Success |
+| T-006 | `RSF-FR-009`, `RSF-FR-010`, `RSF-RS-005` | Verify `try_decode` for adequate and oversized buffers and reject undersized input. | Valid input decodes correctly, trailing bytes are ignored, and short input returns `Err` rather than panicking. | `serialized_struct/tests/serialized_struct_raw.rs` | `checked_decode_validates_buffer_size` | ✅ Success |
+| T-007 | `RSF-FR-007`, `RSF-FR-008`, `RSF-FR-009` | Verify a derived `SerializedStruct` retains its generated implementation and inherits the checked methods. | Derived struct encodes and decodes successfully through `try_encode` and `try_decode`. | `serialized_struct/tests/serialized_struct_raw.rs` | `derived_serialized_struct_uses_checked_methods` | ✅ Success |
 
 ### Acceptance criteria
 
@@ -313,6 +330,6 @@ template's required labels: **✅ Success** or **❌ Failed**.
 - Changing derive macro parsing or generated implementations.
 - Adding support for unions, enums, strings, collections, or additional
   floating-point formats.
-- Defining a portable, architecture-independent representation for `usize`
-  and `isize`.
+- A built-in portable representation for `usize` and `isize`: rejected in
+  revision 0.3 in favor of a compile error.
 - Changing the on-disk format used by existing file consumers.

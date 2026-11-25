@@ -38,7 +38,7 @@ use std::{
 
 use anyhow::{Result, anyhow};
 
-use super::file_metadata::FileMetadata;
+use super::{blob_file::BlobFile, file_metadata::FileMetadata};
 
 const POISONED_MESSAGE: &str = "file lock is poisoned: a thread panicked while holding the write guard; \
      call FileLock::recover to inspect the interrupted write and clear the poison";
@@ -84,6 +84,8 @@ pub struct PoisonReport {
 /// lets the write guard store it without taking another lock.
 struct Shared {
     metadata: FileMetadata,
+    /// Companion blob file of the struct file, locked with it.
+    blob: Option<BlobFile>,
     poison_report: Option<PoisonReport>,
 }
 
@@ -106,9 +108,22 @@ pub struct FileLock {
 impl FileLock {
     /// Takes ownership of `metadata` and returns an unlocked `FileLock`.
     pub fn new(metadata: FileMetadata) -> Self {
+        Self::from_shared(metadata, None)
+    }
+
+    /// Takes ownership of a struct file and its companion [`BlobFile`],
+    /// guarded together by the same lock: read guards give `&BlobFile`
+    /// ([`FileReadGuard::blob`]), write guards `&mut BlobFile`
+    /// ([`FileWriteGuard::parts_mut`]).
+    pub fn with_blob(metadata: FileMetadata, blob: BlobFile) -> Self {
+        Self::from_shared(metadata, Some(blob))
+    }
+
+    fn from_shared(metadata: FileMetadata, blob: Option<BlobFile>) -> Self {
         Self {
             inner: RwLock::new(Shared {
                 metadata,
+                blob,
                 poison_report: None,
             }),
             generation: AtomicU64::new(0),
@@ -201,15 +216,27 @@ impl FileLock {
         Ok(&mut shared.metadata)
     }
 
-    /// Consumes the lock and returns the owned [`FileMetadata`].
+    /// Consumes the lock and returns the owned [`FileMetadata`]. A
+    /// companion blob file is closed; use [`into_parts`](Self::into_parts)
+    /// to keep it.
     ///
     /// # Errors
     ///
     /// Returns an error if the lock is poisoned; call [`FileLock::recover`]
     /// first.
     pub fn into_inner(self) -> Result<FileMetadata> {
+        Ok(self.into_parts()?.0)
+    }
+
+    /// Consumes the lock and returns the owned [`FileMetadata`] and the
+    /// companion [`BlobFile`], if any.
+    ///
+    /// # Errors
+    ///
+    /// As [`into_inner`](Self::into_inner).
+    pub fn into_parts(self) -> Result<(FileMetadata, Option<BlobFile>)> {
         let shared = self.inner.into_inner().map_err(poisoned)?;
-        Ok(shared.metadata)
+        Ok((shared.metadata, shared.blob))
     }
 
     /// Inspects and clears a poisoned lock. Blocks like [`FileLock::write`].
@@ -242,6 +269,30 @@ impl FileLock {
         }
     }
 
+    /// Takes the write lock and makes the file durable with
+    /// [`FileMetadata::sync_data`]. Blocks like [`FileLock::write`].
+    ///
+    /// The write guard is released normally afterwards, so
+    /// [`generation`](Self::generation) increases: a sync can truncate rows
+    /// reserved with [`FileMetadata::reserve_rows`].
+    ///
+    /// # Errors
+    ///
+    /// The errors of [`FileLock::write`] (including a poisoned lock), or of
+    /// [`FileMetadata::sync_data`].
+    pub fn sync_data(&self) -> Result<()> {
+        self.write()?.sync_data()
+    }
+
+    /// Like [`sync_data`](Self::sync_data), with [`FileMetadata::sync_all`].
+    ///
+    /// # Errors
+    ///
+    /// As [`sync_data`](Self::sync_data).
+    pub fn sync_all(&self) -> Result<()> {
+        self.write()?.sync_all()
+    }
+
     /// Number of write guards released normally (not by a panic) since the
     /// lock was created. Read guards, [`FileLock::get_mut`], and write guards
     /// dropped by a panic do not change it. Readable even when poisoned.
@@ -261,6 +312,14 @@ impl From<FileMetadata> for FileLock {
 /// The read lock is released when the guard is dropped.
 pub struct FileReadGuard<'a> {
     guard: RwLockReadGuard<'a, Shared>,
+}
+
+impl FileReadGuard<'_> {
+    /// The companion blob file, if the lock was built with
+    /// [`FileLock::with_blob`].
+    pub fn blob(&self) -> Option<&BlobFile> {
+        self.guard.blob.as_ref()
+    }
 }
 
 impl Deref for FileReadGuard<'_> {
@@ -304,6 +363,20 @@ impl<'a> FileWriteGuard<'a> {
             before,
             panicking_at_acquire: thread::panicking(),
         })
+    }
+}
+
+impl FileWriteGuard<'_> {
+    /// The companion blob file, if the lock was built with
+    /// [`FileLock::with_blob`].
+    pub fn blob(&self) -> Option<&BlobFile> {
+        self.guard.blob.as_ref()
+    }
+
+    /// Mutable access to the metadata and the companion blob file at once.
+    pub fn parts_mut(&mut self) -> (&mut FileMetadata, Option<&mut BlobFile>) {
+        let shared = &mut *self.guard;
+        (&mut shared.metadata, shared.blob.as_mut())
     }
 }
 

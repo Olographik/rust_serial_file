@@ -38,7 +38,7 @@ use std::{
     collections::{HashMap, hash_map},
     error::Error,
     fmt,
-    fs::{OpenOptions, TryLockError},
+    fs::{File, OpenOptions, TryLockError},
     hash::Hash,
     iter::FusedIterator,
     path::Path,
@@ -50,9 +50,11 @@ use anyhow::{Context, Result, bail};
 use crate::serialized_struct::SerializedStruct;
 
 use super::{
+    blob_file::{BlobFields, BlobFile, BlobStats, ensure_no_leftover_compaction},
     file_lock::{FileLock, FileReadGuard, FileWriteGuard},
     file_metadata::FileMetadata,
-    struct_file::StructFile,
+    struct_blob_file::compact_files,
+    struct_file::{StructFile, StructReadOnlyFile, StructWriteFile},
 };
 
 /// Errors specific to [`FileAtlas`] operations.
@@ -85,6 +87,36 @@ impl fmt::Display for FileAtlasError {
 }
 
 impl Error for FileAtlasError {}
+
+/// Error of [`FileAtlas::sync_all_files`]: every file that failed to sync,
+/// with its key and error.
+///
+/// Returned inside [`anyhow::Error`]; use
+/// `error.downcast_ref::<FileAtlasSyncError<K>>()` to read the failures.
+/// Unlike [`FileAtlasError`], it carries the keys, because the caller needs
+/// them to know which files may not be persisted.
+#[derive(Debug)]
+pub struct FileAtlasSyncError<K> {
+    /// The keys of the files that failed, in the atlas iteration order, with
+    /// their errors.
+    pub failures: Vec<(K, anyhow::Error)>,
+}
+
+impl<K: fmt::Debug> fmt::Display for FileAtlasSyncError<K> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "{} file(s) of the atlas failed to sync",
+            self.failures.len()
+        )?;
+        for (key, error) in &self.failures {
+            write!(formatter, "; {key:?}: {error:#}")?;
+        }
+        Ok(())
+    }
+}
+
+impl<K: fmt::Debug> Error for FileAtlasSyncError<K> {}
 
 /// A thread-safe map from keys to opened row files.
 ///
@@ -152,31 +184,51 @@ impl<K: Hash + Eq> FileAtlas<K> {
 
         // Opening and locking happen without the map lock, so a slow open
         // does not block other threads.
-        let path = path.as_ref();
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(path)
-            .with_context(|| format!("failed to open or create {}", path.display()))?;
-        match file.try_lock() {
-            Ok(()) => {}
-            Err(TryLockError::WouldBlock) => return Err(FileAtlasError::FileLocked.into()),
-            Err(TryLockError::Error(error)) => {
-                return Err(error).with_context(|| format!("failed to lock {}", path.display()));
-            }
-        }
-        let metadata = FileMetadata::new(file, element_size, data_offset)
-            .with_context(|| format!("failed to read {}", path.display()))?;
-        let handle = Arc::new(FileLock::new(metadata));
+        let metadata = open_locked_metadata(path.as_ref(), element_size, data_offset)?;
+        self.insert_new(key, FileLock::new(metadata))
+    }
 
-        // Another thread may have inserted the key meanwhile; then the new
-        // file is dropped here, which releases its OS lock.
+    /// Inserts a newly opened entry. Another thread may have inserted the
+    /// key meanwhile; then the new files are dropped here, which releases
+    /// their OS locks.
+    fn insert_new(&self, key: K, lock: FileLock) -> Result<Arc<FileLock>> {
         match self.write_entries().entry(key) {
             hash_map::Entry::Occupied(_) => Err(FileAtlasError::KeyAlreadyPresent.into()),
-            hash_map::Entry::Vacant(entry) => Ok(Arc::clone(entry.insert(handle))),
+            hash_map::Entry::Vacant(entry) => Ok(Arc::clone(entry.insert(Arc::new(lock)))),
         }
+    }
+
+    /// Opens or creates a struct file of `T` rows together with its blob
+    /// file, under the key `key`. Both files are OS-locked like
+    /// [`open_or_create`](Self::open_or_create), and guarded by the same
+    /// [`FileLock`] (see [`FileLock::with_blob`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`open_or_create`](Self::open_or_create) for either file, and if a
+    /// `.compact` file of either path exists (an interrupted compaction) or
+    /// the blob file is invalid. Nothing is inserted on error.
+    pub fn open_struct_with_blob<T: SerializedStruct>(
+        &self,
+        key: K,
+        path: impl AsRef<Path>,
+        blob_path: impl AsRef<Path>,
+        data_offset: u64,
+    ) -> Result<Arc<FileLock>> {
+        if self.read_entries().contains_key(&key) {
+            return Err(FileAtlasError::KeyAlreadyPresent.into());
+        }
+        let path = path.as_ref();
+        let blob_path = blob_path.as_ref();
+        ensure_no_leftover_compaction(path)?;
+        ensure_no_leftover_compaction(blob_path)?;
+        let element_size =
+            u64::try_from(T::SIZE).context("serialized row size does not fit in u64")?;
+        let metadata = open_locked_metadata(path, element_size, data_offset)?;
+        let mut blob = BlobFile::new(open_locked(blob_path)?)
+            .with_context(|| format!("failed to read {}", blob_path.display()))?;
+        blob.set_path(blob_path.to_owned());
+        self.insert_new(key, FileLock::with_blob(metadata, blob))
     }
 
     /// Opens or creates a file whose rows are `T` records, as
@@ -371,6 +423,122 @@ impl<K: Hash + Eq> FileAtlas<K> {
         f(&mut view)
     }
 
+    /// Calls `f` with a read-only typed view of the struct file of `key` and
+    /// its blob file, holding the read guard while `f` runs.
+    ///
+    /// # Errors
+    ///
+    /// As [`with_struct_read`](Self::with_struct_read), and if the entry has
+    /// no blob file (it was not opened with
+    /// [`open_struct_with_blob`](Self::open_struct_with_blob)); `f` is then
+    /// not called.
+    pub fn with_struct_blob_read<T, Q, R>(
+        &self,
+        key: &Q,
+        f: impl FnOnce(&StructReadOnlyFile<'_, T>, &BlobFile) -> Result<R>,
+    ) -> Result<R>
+    where
+        T: SerializedStruct,
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        let handle = self.handle(key)?;
+        let guard = handle.read()?;
+        let blob = guard.blob().ok_or_else(no_blob_file)?;
+        let view = StructFile::new(&*guard)?;
+        f(&view, blob)
+    }
+
+    /// Calls `f` with a writable typed view of the struct file of `key` and
+    /// its blob file, holding the write guard while `f` runs.
+    ///
+    /// # Errors
+    ///
+    /// As [`with_struct_blob_read`](Self::with_struct_blob_read).
+    pub fn with_struct_blob_write<T, Q, R>(
+        &self,
+        key: &Q,
+        f: impl FnOnce(&mut StructWriteFile<'_, T>, &mut BlobFile) -> Result<R>,
+    ) -> Result<R>
+    where
+        T: SerializedStruct,
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        let handle = self.handle(key)?;
+        let mut guard = handle.write()?;
+        let (metadata, blob) = guard.parts_mut();
+        let blob = blob.ok_or_else(no_blob_file)?;
+        let mut view = StructFile::new(metadata)?;
+        f(&mut view, blob)
+    }
+
+    /// Compacts the blob file of `key` and rewrites the rows' references,
+    /// holding the write guard; see
+    /// [`StructBlobFile::compact`](super::struct_blob_file::StructBlobFile::compact)
+    /// for the steps and the recovery of an interrupted compaction. The new
+    /// files are OS-locked like the old ones.
+    ///
+    /// Returns the statistics of the new blob file.
+    ///
+    /// # Errors
+    ///
+    /// [`FileAtlasError::KeyNotFound`], the [`FileLock`] poisoning error, a
+    /// missing blob file, a row width other than `T::SIZE`, or a compaction
+    /// error.
+    pub fn compact_blob<T, Q>(&self, key: &Q) -> Result<BlobStats>
+    where
+        T: SerializedStruct + BlobFields,
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        let handle = self.handle(key)?;
+        let mut guard = handle.write()?;
+        let (metadata, blob) = guard.parts_mut();
+        let blob = blob.ok_or_else(no_blob_file)?;
+        StructFile::<T, _>::new(&*metadata)?;
+        compact_files::<T>(metadata, blob, true)
+    }
+
+    /// Makes the file of `key` durable with [`FileLock::sync_data`], taking
+    /// its write lock for the duration of the sync.
+    ///
+    /// # Errors
+    ///
+    /// [`FileAtlasError::KeyNotFound`], or the error of
+    /// [`FileLock::sync_data`] (including a poisoned lock).
+    pub fn sync<Q>(&self, key: &Q) -> Result<()>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        self.handle(key)?.sync_data()
+    }
+
+    /// Syncs every file of the atlas with [`FileLock::sync_data`].
+    ///
+    /// The files are taken from a snapshot of the atlas (see
+    /// [`iter`](Self::iter)); the map lock is not held while syncing, so
+    /// other files stay usable. Every file is tried, even after a failure.
+    ///
+    /// # Errors
+    ///
+    /// A [`FileAtlasSyncError<K>`] listing every key whose sync failed.
+    pub fn sync_all_files(&self) -> Result<()>
+    where
+        K: Clone + fmt::Debug + Send + Sync + 'static,
+    {
+        let failures: Vec<(K, anyhow::Error)> = self
+            .iter()
+            .filter_map(|(key, handle)| handle.sync_data().err().map(|error| (key, error)))
+            .collect();
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(FileAtlasSyncError { failures }.into())
+        }
+    }
+
     fn handle<Q>(&self, key: &Q) -> Result<Arc<FileLock>>
     where
         K: Borrow<Q>,
@@ -389,6 +557,39 @@ impl<K: Hash + Eq> FileAtlas<K> {
     fn write_entries(&self) -> RwLockWriteGuard<'_, HashMap<K, Arc<FileLock>>> {
         self.entries.write().unwrap_or_else(PoisonError::into_inner)
     }
+}
+
+fn no_blob_file() -> anyhow::Error {
+    anyhow::anyhow!(
+        "the file atlas entry has no blob file; open it with FileAtlas::open_struct_with_blob"
+    )
+}
+
+/// Opens or creates `path` and takes its exclusive operating-system lock.
+fn open_locked(path: &Path) -> Result<File> {
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)
+        .with_context(|| format!("failed to open or create {}", path.display()))?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(TryLockError::WouldBlock) => Err(FileAtlasError::FileLocked.into()),
+        Err(TryLockError::Error(error)) => {
+            Err(error).with_context(|| format!("failed to lock {}", path.display()))
+        }
+    }
+}
+
+/// [`open_locked`], then wraps the file in a [`FileMetadata`] that knows
+/// its path.
+fn open_locked_metadata(path: &Path, element_size: u64, data_offset: u64) -> Result<FileMetadata> {
+    let mut metadata = FileMetadata::new(open_locked(path)?, element_size, data_offset)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    metadata.set_path(path.to_owned());
+    Ok(metadata)
 }
 
 impl<K: Hash + Eq> Default for FileAtlas<K> {

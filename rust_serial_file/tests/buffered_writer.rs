@@ -302,3 +302,43 @@ fn drop_does_not_panic_when_flush_fails() {
         replace_file(&path, b"ab");
     }
 }
+
+#[test]
+fn sync_flushes_pending_rows() {
+    let (_directory, path, mut metadata) = open_metadata(b"abcd", 2);
+    let mut writer = BufferedWriter::with_capacity(&mut metadata, 8).unwrap();
+    // Contiguous rows from row 1: they stay in the writer's cache window.
+    writer.write_row(1, b"XY").unwrap();
+    writer.write_row(2, b"EF").unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), b"abcd");
+
+    writer.sync_data().unwrap();
+    // Visible through another handle while the writer is alive.
+    assert_eq!(std::fs::read(&path).unwrap(), b"abXYEF");
+
+    writer.write_row(3, b"GH").unwrap();
+    writer.sync_all().unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), b"abXYEFGH");
+    // The cache is empty: dropping the writer writes nothing more.
+    replace_file(&path, b"zzzzzzzz");
+    drop(writer);
+    assert_eq!(std::fs::read(&path).unwrap(), b"zzzzzzzz");
+}
+
+#[test]
+fn sync_reports_flush_error() {
+    let (_directory, path, mut metadata) = open_metadata(b"abcdefgh", 2);
+    let mut writer = BufferedWriter::with_capacity(&mut metadata, 3).unwrap();
+    writer.write_row(2, b"XY").unwrap();
+
+    replace_file(&path, b"ab");
+    assert!(writer.sync_data().is_err());
+    assert!(writer.sync_all().is_err());
+    assert_eq!(writer.len(), 4);
+
+    // The pending row was kept and is written by the next successful sync.
+    replace_file(&path, b"abcdefgh");
+    writer.sync_data().unwrap();
+    drop(writer);
+    assert_eq!(read_rows(&mut metadata), b"abcdXYgh");
+}

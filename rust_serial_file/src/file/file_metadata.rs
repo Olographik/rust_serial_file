@@ -1,7 +1,7 @@
 use std::{
     fs::{File, OpenOptions},
     io::{self, Read, Seek, SeekFrom, Write},
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 #[cfg(unix)]
@@ -16,6 +16,7 @@ const COPY_BUFFER_SIZE: usize = 64 * 1024;
 /// A fixed-width row view over a file with an optional leading metadata prefix.
 pub struct FileMetadata {
     file: File,
+    path: Option<PathBuf>,
     element_size: u64,
     data_offset: u64,
     element_count: u64,
@@ -36,6 +37,7 @@ impl FileMetadata {
 
         Ok(Self {
             file,
+            path: None,
             element_size,
             data_offset,
             element_count,
@@ -60,7 +62,21 @@ impl FileMetadata {
             .open(path.as_ref())
             .with_context(|| format!("failed to open or create {}", path.as_ref().display()))?;
 
-        Self::new(file, element_size, data_offset)
+        let mut metadata = Self::new(file, element_size, data_offset)?;
+        metadata.path = Some(path.as_ref().to_owned());
+        Ok(metadata)
+    }
+
+    /// The path the file was opened from: set by
+    /// [`open_or_create`](Self::open_or_create) (and by `FileAtlas`), `None`
+    /// for a [`new`](Self::new) handle. Only used to locate files, for
+    /// example by blob compaction; it is not checked against the file.
+    pub fn path(&self) -> Option<&Path> {
+        self.path.as_deref()
+    }
+
+    pub(crate) fn set_path(&mut self, path: PathBuf) {
+        self.path = Some(path);
     }
 
     pub fn file_len(&self) -> Result<u64> {
@@ -280,6 +296,62 @@ impl FileMetadata {
         Ok(())
     }
 
+    /// Makes the file's content and length durable: after a successful call,
+    /// every write done so far survives a crash or power loss, as far as the
+    /// operating system and the device honor [`File::sync_data`].
+    ///
+    /// Rows reserved with [`reserve_rows`](Self::reserve_rows) and not
+    /// written are released first (the file is truncated to the logical row
+    /// count), so the synced file reopens with the same
+    /// [`element_count`](Self::element_count).
+    ///
+    /// Writes done after the last successful sync have no durability
+    /// guarantee. Dropping a `FileMetadata` does not sync.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if releasing the reservation or the sync fails. After
+    /// a failed sync, earlier writes may not be persisted, and retrying may
+    /// report success without persisting them (on Linux, a failed `fsync` can
+    /// drop the pending data): treat the file as possibly not persisted.
+    pub fn sync_data(&mut self) -> Result<()> {
+        self.release_reserved_rows()?;
+        self.file
+            .sync_data()
+            .context("failed to sync file data to storage")
+    }
+
+    /// Like [`sync_data`](Self::sync_data), and also makes the file's
+    /// metadata (timestamps, permissions) durable, with [`File::sync_all`].
+    ///
+    /// # Errors
+    ///
+    /// As [`sync_data`](Self::sync_data).
+    pub fn sync_all(&mut self) -> Result<()> {
+        self.release_reserved_rows()?;
+        self.file
+            .sync_all()
+            .context("failed to sync file data and metadata to storage")
+    }
+
+    /// Truncates the file to its logical end when it still ends at this
+    /// handle's reservation. If the file length changed through another
+    /// handle, there is no reservation of ours left to release.
+    fn release_reserved_rows(&mut self) -> Result<()> {
+        if self.reserved_rows <= self.element_count {
+            return Ok(());
+        }
+        if self.file_len()? != self.row_end(self.reserved_rows)? {
+            return Ok(());
+        }
+        let logical_end = self.row_end(self.element_count)?;
+        self.file
+            .set_len(logical_end)
+            .context("failed to release reserved rows before syncing")?;
+        self.reserved_rows = self.element_count;
+        Ok(())
+    }
+
     pub fn iter_rows(&self) -> Result<FileRowIter<'_>> {
         let row_count = self.element_count()?;
         Ok(FileRowIter {
@@ -471,7 +543,7 @@ fn read_at(_file: &File, _buffer: &mut [u8], _offset: u64) -> io::Result<usize> 
     ))
 }
 
-fn read_exact_at(file: &File, mut buffer: &mut [u8], offset: u64) -> io::Result<()> {
+pub(super) fn read_exact_at(file: &File, mut buffer: &mut [u8], offset: u64) -> io::Result<()> {
     let mut position = offset;
     while !buffer.is_empty() {
         match read_at(file, buffer, position) {

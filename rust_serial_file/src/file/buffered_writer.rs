@@ -151,6 +151,32 @@ impl<'metadata> BufferedWriter<'metadata> {
         Ok(())
     }
 
+    /// Flushes pending rows, then makes the file's content and length
+    /// durable with [`FileMetadata::sync_data`].
+    ///
+    /// A flush only hands rows to the operating system; this is the
+    /// durability point.
+    ///
+    /// # Errors
+    ///
+    /// If the flush fails, its error is returned, the sync is not attempted
+    /// and the pending rows stay cached. Sync errors are returned as by
+    /// [`FileMetadata::sync_data`].
+    pub fn sync_data(&mut self) -> Result<()> {
+        self.flush()?;
+        self.metadata.sync_data()
+    }
+
+    /// Like [`sync_data`](Self::sync_data), with [`FileMetadata::sync_all`].
+    ///
+    /// # Errors
+    ///
+    /// As [`sync_data`](Self::sync_data).
+    pub fn sync_all(&mut self) -> Result<()> {
+        self.flush()?;
+        self.metadata.sync_all()
+    }
+
     fn prepare_window(&mut self, start: u64, row_count: usize) -> Result<()> {
         if self.end_ptr == 0 {
             self.window_start = start;

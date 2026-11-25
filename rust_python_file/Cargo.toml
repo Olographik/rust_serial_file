@@ -11,8 +11,15 @@ name="rust_python_file"
 rust_serial_file={path = "../rust_serial_file"}
 serialized_struct_derive={path = "../serialized_struct_derive"}
 utils={path = "../utils"}
-pyo3 = { version = "0.28", features = ["extension-module"] }
+pyo3 = "0.28"
 pyo3-stub-gen = "0.22.2"
+
+[features]
+# Build as a Python extension module: do not link libpython, the interpreter
+# that imports the module provides it. Enabled by create_python_module.ps1 for
+# the release build; left off by default so `cargo test` can link the test
+# binaries against libpython.
+extension-module = ["pyo3/extension-module"]
 
 [dev-dependencies]
 tempfile = "3.23.0"

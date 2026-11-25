@@ -758,3 +758,27 @@ fn panic_with_struct_file_write_view_poisons_and_reports() {
     let reader = StructFile::<Value, _>::new(lock.read().unwrap()).unwrap();
     assert_eq!(read_values(&reader), [0, 1, 2, 10, 11]);
 }
+
+#[test]
+fn lock_sync_and_poison() {
+    let directory = tempdir().unwrap();
+    let path = path_in(&directory);
+    let lock = Arc::new(FileLock::open_or_create(&path, ROW_SIZE, 0).unwrap());
+    {
+        let mut guard = lock.write().unwrap();
+        guard.append_row(&row(7)).unwrap();
+        guard.reserve_rows(10).unwrap();
+    }
+    let generation = lock.generation();
+    lock.sync_data().unwrap();
+    // The sync released the reservation through a normal write guard.
+    assert_eq!(lock.generation(), generation + 1);
+    let reopened = FileMetadata::open_or_create(&path, ROW_SIZE, 0).unwrap();
+    assert_eq!(reopened.element_count().unwrap(), 1);
+    assert_eq!(read_value(&reopened, 0), 7);
+    lock.sync_all().unwrap();
+
+    poison_with(&lock, |_| {});
+    assert_poisoned(lock.sync_data());
+    assert_poisoned(lock.sync_all());
+}

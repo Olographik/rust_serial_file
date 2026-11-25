@@ -1,8 +1,8 @@
 # File Atlas Requirements
 
-- **Date:** 2026-11-11
+- **Date:** 2026-11-25
 - **Author:** `Olographik`
-- **Revision:** 0.2
+- **Revision:** 0.4
 - **Short description:** Define a thread-safe `FileAtlas<K>` that opens row files under generic keys, holds each one's operating-system lock, and hands out shared `FileLock` handles, closure-scoped `FileMetadata` access, and typed `StructFile` views.
 
 ## Table of contents
@@ -67,11 +67,17 @@ or a different lock crate; they are deferred (see
 [Out of scope](#out-of-scope)). No `FileLock` change is needed for this
 revision.
 
+Since revision 0.3: `FileAtlas::sync`, `sync_all_files` and `FileAtlasSyncError` are specified in [file_sync.md](file_sync.md).
+
+Since revision 0.4: `FileAtlas::open_struct_with_blob`, `with_struct_blob_read`, `with_struct_blob_write` and `compact_blob` are specified in [dynamic_storage.md](dynamic_storage.md).
+
 ## Revisions
 
 | Revision | Date | Author | Changes |
 |---|---|---|---|
 | 0.2 | 2026-11-11 | `Olographik` | Iteration, before implementation. Added `FA-FR-012` (`iter` snapshot), `FA-FR-013` (`IntoIterator for &FileAtlas`), `FA-FR-014` (`IntoIterator for FileAtlas`), `FA-FR-015` (snapshot handles count as in use), `FA-FR-016` (no `Index`), and `FA-RS-008` (iterator types and traits). Added phase P-005 (iteration); Coverage and Documentation renumbered to P-006 and P-007. Added tests T-020 to T-023. Updated Overview, Scope, Public API, Performance, planning reflection, and Out of scope (`Index` and `SliceIndex` cannot be implemented, with reasons). |
+| 0.3 | 2026-11-25 | `Olographik` | Documentation only; no requirement changed. Overview points to `file_sync.md`, which specifies the new sync methods of this component. |
+| 0.4 | 2026-11-25 | `Olographik` | Documentation only; no requirement changed. Overview points to `dynamic_storage.md`, which specifies this component's blob-file additions. |
 
 ## Goals and scope
 

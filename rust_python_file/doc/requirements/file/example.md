@@ -1,8 +1,8 @@
 # Python Example File Requirements
 
-- **Date:** 2026-11-11
+- **Date:** 2026-11-25
 - **Author:** `Olographik`
-- **Revision:** 0.2
+- **Revision:** 0.3
 - **Short description:** Migrate the `rust_python_file` example (`ExamplStruct`, `PyExampleFile`, `PyPosition`) from the removed `rust_serial_file` file API to `StructFile<T>`, keeping the Python API unchanged, and test the compiled Python module with a build script and Python tests.
 
 ## Table of contents
@@ -66,6 +66,7 @@ The old types map to the new API as follows:
 | Revision | Date | Author | Changes |
 |---|---|---|---|
 | 0.2 | 2026-11-11 | `Olographik` | Before implementation, at the user's request: compile the crate to a Python module and test the binding from Python. Added `RPF-EX-FR-010` (build-and-test script) and `RPF-EX-FR-011` (Python tests). Modified `RPF-EX-RS-004` (the stub is a git-ignored build output, so it is compared with the copy generated before the migration, not a committed file). Added phase P-005 (Python binding tests); Coverage and Documentation renumbered to P-006 and P-007. Added tests T-008 to T-014. Updated Overview, Scope, Assumptions, Compatibility, planning reflection, and Out of scope. |
+| 0.3 | 2026-11-25 | `Olographik` | At the user's request, made pyo3's `extension-module` an opt-in crate feature so `cargo test` links its test binaries on every platform. Added `RPF-EX-RS-005` and test T-015. Added phase P-008 (opt-in `extension-module`); Coverage and Documentation renumbered to P-009 and P-010 and redone. Assumptions, test results, notes, coverage and reflection updated. |
 
 ## Goals and scope
 
@@ -94,7 +95,9 @@ The old types map to the new API as follows:
 ## Assumptions and dependencies
 
 - Dependencies are unchanged: `rust_serial_file`, `serialized_struct_derive`,
-  `utils` (path dependencies), `pyo3 0.28` with `extension-module`,
+  `utils` (path dependencies), `pyo3 0.28` (its `extension-module` feature
+  only through this crate's opt-in `extension-module` feature, see
+  `RPF-EX-RS-005`),
   `pyo3-stub-gen 0.22.2`; dev: `tempfile`, `anyhow`.
 - `utils` is used directly for `SearchContext`
   (`utils::search::search_type::SearchContext`); it is already a dependency.
@@ -150,6 +153,7 @@ The old types map to the new API as follows:
 | `RPF-EX-RS-002` | Read-only methods (`read_at`, `find_by_index`, `item_count`) take `&self`; `write` and `write_at` take `&mut self`. This does not change the Python signatures. | 0.1 |
 | `RPF-EX-RS-003` | `PyPosition` becomes `pub struct PyPosition(pub Option<usize>)`, removing the dependency on the old `Position` type. | 0.1 |
 | `RPF-EX-RS-004` | The code touched by this work builds with no warnings from `cargo clippy --all-targets`, and the stub generated after the migration declares the same classes, methods, parameters, and return types as the `python_module/rust_python_file.pyi` generated before it (a copy is saved before the build, since the file is git-ignored). Docstrings generated from the new doc comments may be added. | 0.2 |
+| `RPF-EX-RS-005` | pyo3's `extension-module` feature shall be enabled only through an opt-in `extension-module` feature of this crate. `create_python_module.ps1` shall build the module with `--features extension-module`; a plain `cargo test` shall build without it, so the test binaries link libpython. | 0.3 |
 
 ## Public API
 
@@ -254,8 +258,9 @@ impl PyExampleFile {
 | P-003 | **Tests:** rewrite `test_example_file` for the new API and add the `PyExampleFile` tests T-002 to T-007. | P-002 | T-001 to T-007 pass (`PATH` including the Python directory). |
 | P-004 | **Stub check:** save a copy of the current `python_module/rust_python_file.pyi` (generated before the migration), build the module, and compare the newly generated stub with the copy. | P-002 | The two stubs are identical. |
 | P-005 | **Python binding tests:** add `test_python_module.ps1` and `python_tests/test_example.py`; run the script. | P-004 | The script builds the module and T-008 to T-014 pass; the script returns a non-zero exit code when a test is made to fail on purpose (checked once, then reverted). |
-| P-006 | **Coverage:** run the tests with coverage for the touched files only and record the results in [Code coverage](#code-coverage). | P-001 to P-005 | Coverage is measured for every touched Rust file, the results are recorded, and any uncovered code is justified. |
-| P-007 | **Documentation:** update this requirements document and the code comments of the touched files. | P-006 | The document matches the implemented behavior and test results; public items in the touched files have doc comments. |
+| P-008 | **Opt-in `extension-module`:** move pyo3's `extension-module` behind a crate feature and enable it in `create_python_module.ps1`. | P-005 | T-001 to T-007 link and pass with `cargo test` on Linux; T-015 passes. |
+| P-009 | **Coverage:** run the tests with coverage for the touched files only and record the results in [Code coverage](#code-coverage). | P-001 to P-005, P-008 | Coverage is measured for every touched Rust file, the results are recorded, and any uncovered code is justified. |
+| P-010 | **Documentation:** update this requirements document and the code comments of the touched files. | P-009 | The document matches the implemented behavior and test results; public items in the touched files have doc comments. |
 
 ### Current implementation checklist
 
@@ -264,8 +269,9 @@ impl PyExampleFile {
 - [x] P-003 — `Tests` — Done
 - [x] P-004 — `Stub check` — Done
 - [x] P-005 — `Python binding tests` — Done
-- [x] P-006 — `Coverage of touched files` — Done
-- [x] P-007 — `Documentation update` — Done
+- [x] P-008 — `Opt-in extension-module feature` — Done
+- [x] P-009 — `Coverage of touched files` — Done
+- [x] P-010 — `Documentation update` — Done
 
 **Planning reflection (complete before implementation):**
 
@@ -322,13 +328,22 @@ impl PyExampleFile {
   happen): the `.pyd` was rebuilt and the stub regenerated. With a temporary
   failing test added, the script exited with code 1 and named the failing
   step; the temporary file was deleted afterwards.
-- **P-006:** coverage found two gaps, closed with small test additions: the
+- **P-006 (now P-009):** coverage found two gaps, closed with small test additions: the
   search error path (T-004 now truncates the file behind an open
   `PyExampleFile`) and `ExamplStruct: PartialEq<u64>` (T-003).
 - **Not met, acceptance criterion 1:** `cargo clippy --all-targets` reports
   one warning, `needless_range_loop` in `make_buffer` (`src/file/mod.rs`
   line 11). It is existing code that this work leaves unchanged (Out of
   scope); the code touched by this work has no warnings.
+- **P-008 (revision 0.3, 2026-11-25):** with pyo3's `extension-module`
+  always on, `cargo test` could not link the test binaries on Linux
+  (unresolved libpython symbols); on Windows the DLL link hid the problem.
+  The feature is now opt-in (`RPF-EX-RS-005`). Coverage and Documentation
+  were renumbered to P-009 and P-010 and redone after it, as the phase rules
+  require. Consequence: `cargo test --all-features` turns the feature back
+  on and fails to link again; use plain `cargo test`. `stub_gen` still runs
+  without the feature (`cargo run --release --bin stub_gen`), since a binary
+  linked with `extension-module` would not link on Linux either.
 
 ## Testing and acceptance criteria
 
@@ -350,6 +365,7 @@ impl PyExampleFile {
 | T-012 | `RPF-EX-FR-011`, `RPF-EX-FR-005`, `RPF-EX-FR-009` | From Python, `write_at` past the end. | Raises `TypeError` starting with `Could not write in the file`; `item_count()` is unchanged. |
 | T-013 | `RPF-EX-FR-011`, `RPF-EX-FR-006` | From Python, `write` and `write_at` on a file opened read-only. | Both raise `TypeError` mentioning read-only; reopening read-write shows the original record count. |
 | T-014 | `RPF-EX-FR-010` | Run `test_python_module.ps1` from the workspace root. | The module is built into `rust_python_file/python_module/`, T-008 to T-013 run and pass, the exit code is 0, and the current directory is restored. |
+| T-015 | `RPF-EX-RS-005` | On Linux: `cargo test` (no features), then `cargo build --release --features extension-module` and the Python tests (`python_tests/`) against the built library. | `cargo test` links and T-001 to T-007 pass; the extension builds, imports in Python and the Python tests pass. |
 
 #### Test location
 
@@ -369,6 +385,7 @@ impl PyExampleFile {
 | T-012 | `rust_python_file/python_tests/test_example.py` | `test_write_at_past_the_end_raises` |
 | T-013 | `rust_python_file/python_tests/test_example.py` | `test_read_only_file_rejects_writes` |
 | T-014 | `test_python_module.ps1` | script run (`powershell -File test_python_module.ps1`) |
+| T-015 | `rust_python_file/` (shell check) | `cargo test`; release build; `python3 -m pytest python_tests` |
 
 #### Test results
 
@@ -388,11 +405,21 @@ impl PyExampleFile {
 | T-012 | 2026-11-11 | `a55d727+dirty` | ✅ Success |
 | T-013 | 2026-11-11 | `a55d727+dirty` | ✅ Success |
 | T-014 | 2026-11-11 | `a55d727+dirty` | ✅ Success |
+| T-015 | 2026-11-25 | `6fc4c4d` | ✅ Success |
 
 #### Notes
 
 - Environment: Windows 10, `cargo 1.95.0`, Anaconda Python 3.13.5 with
   `pytest` 8.3.4.
+- T-015 (2026-11-25, Linux, Python 3 from the system, `pytest` installed):
+  `cargo test` → 7 passed (T-001 to T-007 also pass on Linux now);
+  `cargo build --release --features extension-module` produced
+  `librust_python_file.so`, which was copied as `rust_python_file.so` to a
+  scratch directory on `PYTHONPATH`; `python3 -m pytest python_tests` → 6
+  passed. `cargo run --release --bin stub_gen` also ran. PowerShell is not
+  available in that environment, so `test_python_module.ps1` (T-014) was
+  not re-run; its only change is the added `--features extension-module`
+  in `create_python_module.ps1`.
 - T-001 to T-007: `cargo test` from `rust_python_file/`, with
   `PYO3_PYTHON=C:\Users\benoi\anaconda3\python.exe` and that directory on
   `PATH`: 7 passed.
@@ -430,7 +457,7 @@ impl PyExampleFile {
   reachable behavior and branches where practical; document and justify any
   remaining uncovered code. Do not reduce coverage by excluding relevant code
   from the measured scope.
-- **Coverage summary:** measured in P-006 with the Rust tests only (the
+- **Coverage summary:** measured in P-006 and re-measured in P-009 with the Rust tests only (the
   Python tests use the uninstrumented release build). `example.rs` has
   97.70% line coverage; its only unexecuted line is PyO3-generated wrapper
   code. `mod.rs` is lower because of the unchanged, untested `make_buffer`.
@@ -445,8 +472,10 @@ impl PyExampleFile {
   `cargo llvm-cov --all-targets`, then
   `cargo llvm-cov report --show-missing-lines`. Branch coverage is `N/A`:
   `--branch` needs a nightly compiler.
-- **Date of run:** 2026-11-11
-- **Git hash:** `a55d727+dirty`
+- **Date of run:** 2026-11-25 (re-run for P-009 on Linux, same command
+  without `PYO3_PYTHON`; results identical to the 2026-11-11 Windows run on
+  `a55d727+dirty`)
+- **Git hash:** `6fc4c4d`
 
 | File name | Function coverage | Line coverage | Region coverage | Branch coverage |
 |---|---|---|---|---|

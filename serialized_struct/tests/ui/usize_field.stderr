@@ -1,0 +1,5 @@
+error: #[derive(SerializedStruct)] does not support the `usize` field `index` of `Row`: its size depends on the target platform. Use a fixed-width type (for example `u64` or `i64`), or implement `EncodeRaw`, `DecodeRaw` and `SerializedStruct` by hand for this struct.
+ --> tests/ui/usize_field.rs:6:12
+  |
+6 |     index: usize,
+  |            ^^^^^
