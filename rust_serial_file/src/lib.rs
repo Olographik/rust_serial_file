@@ -1,3 +1,5 @@
 pub mod adapter;
 pub mod file;
-pub mod serialized_struct;
+/// Record encoding traits, re-exported from the `serialized_struct` crate so
+/// the historical path `rust_serial_file::serialized_struct` keeps working.
+pub use serialized_struct;

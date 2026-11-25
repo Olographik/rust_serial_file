@@ -132,6 +132,7 @@ name = "rust_serial_file"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "serialized_struct",
  "serialized_struct_derive",
  "tempfile",
  "utils",
@@ -148,6 +149,13 @@ dependencies = [
  "libc",
  "linux-raw-sys",
  "windows-sys",
+]
+
+[[package]]
+name = "serialized_struct"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
 ]
 
 [[package]]

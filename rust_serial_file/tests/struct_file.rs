@@ -691,3 +691,59 @@ fn views_are_send_and_sync() {
     assert_send_sync::<StructReadOnlyFile<'static, Record>>();
     assert_send_sync::<StructWriteFile<'static, Record>>();
 }
+
+/// Records defined against the extracted `serialized_struct` crate directly,
+/// instead of the `rust_serial_file::serialized_struct` re-export.
+mod extracted_crate {
+    use ::serialized_struct::SerializedStruct as _;
+    use rust_serial_file::{
+        adapter::{
+            abstract_serial_read::SerialDataReader, abstract_serial_write::SerialDataWriter,
+        },
+        file::struct_file::StructFile,
+    };
+    use tempfile::tempdir;
+
+    /// Implemented by hand through `::serialized_struct`, the extern crate.
+    #[derive(Debug, PartialEq)]
+    struct Manual(u16);
+
+    impl ::serialized_struct::EncodeRaw for Manual {
+        fn encode(&self, data: &mut [u8]) -> usize {
+            self.0.encode(data)
+        }
+    }
+
+    impl ::serialized_struct::DecodeRaw for Manual {
+        fn from_le_bytes_slices(data: &[u8], offset: &mut usize) -> Self {
+            Self(u16::from_le_bytes_slices(data, offset))
+        }
+    }
+
+    impl ::serialized_struct::SerializedStruct for Manual {
+        const SIZE: usize = 2;
+    }
+
+    #[test]
+    fn accepts_type_from_new_crate() {
+        let directory = tempdir().unwrap();
+        let mut file =
+            StructFile::<Manual>::open_or_create(directory.path().join("manual.bin"), 0).unwrap();
+        file.serial_write(Manual(0x0102)).unwrap();
+        assert_eq!(file.serial_get(0).unwrap(), Manual(0x0102));
+        assert_eq!(Manual::SIZE, 2);
+    }
+}
+
+/// The derive macro emits the relative path `serialized_struct::…`; with
+/// `use rust_serial_file::serialized_struct;` in scope (as at the top of this
+/// file) it resolves through the re-export.
+#[test]
+fn derives_through_reexport() {
+    let directory = tempdir().unwrap();
+    let mut file =
+        StructFile::<Record>::open_or_create(directory.path().join("reexport.bin"), 0).unwrap();
+    file.serial_write(record(4)).unwrap();
+    assert_eq!(file.serial_get(0).unwrap(), record(4));
+    assert_eq!(Record::SIZE, 8);
+}

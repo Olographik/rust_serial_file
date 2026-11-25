@@ -1,0 +1,17 @@
+[package]
+name = "serialized_struct"
+version = "0.1.0"
+edition = "2024"
+description = "Fixed-layout little-endian encoding traits shared by rust_serial_file and WebAssembly clients."
+
+[features]
+default = []
+# Re-export the `SerializedStruct` derive macro from `serialized_struct_derive`.
+derive = ["dep:serialized_struct_derive"]
+
+[dependencies]
+anyhow = "1.0.104"
+serialized_struct_derive = { path = "../serialized_struct_derive", optional = true }
+
+[dev-dependencies]
+serialized_struct_derive = { path = "../serialized_struct_derive" }

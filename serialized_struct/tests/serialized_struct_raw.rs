@@ -1,4 +1,4 @@
-use rust_serial_file::serialized_struct::{self, DecodeRaw, EncodeRaw, SerializedStruct};
+use serialized_struct::{DecodeRaw, EncodeRaw, SerializedStruct};
 
 fn assert_primitive_round_trip<T>(value: T, expected: &[u8])
 where
