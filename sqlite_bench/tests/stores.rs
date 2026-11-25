@@ -202,3 +202,36 @@ fn named_stores_agree() {
         assert!(sqlite.update(&[(5_000, "x".to_owned())]).is_err());
     }
 }
+
+#[test]
+fn stores_can_be_recreated_and_reopened() {
+    let directory = tempdir().unwrap();
+    let samples = generate(50, 5);
+    for _ in 0..2 {
+        // Creating again in the same directory starts from an empty store.
+        let mut serial = SerialStore::create(directory.path(), Profile::Fast).unwrap();
+        let mut sqlite = SqliteStore::create(directory.path(), Profile::Fast).unwrap();
+        assert!(serial.is_empty().unwrap());
+        assert!(sqlite.is_empty().unwrap());
+        serial.append_batches(&samples, 0).unwrap();
+        sqlite.append_batches(&samples, 0).unwrap();
+        check_same_data(&serial, &sqlite).unwrap();
+    }
+
+    let names = generate_names(50, 6);
+    for _ in 0..2 {
+        let mut blob = BlobNamedStore::create(directory.path(), Profile::Fast).unwrap();
+        let mut sqlite = SqliteNamedStore::create(directory.path(), Profile::Fast).unwrap();
+        blob.append_batches(&names, 0).unwrap();
+        sqlite.append_batches(&names, 0).unwrap();
+    }
+    let blob = BlobNamedStore::open(directory.path(), Profile::Durable).unwrap();
+    let sqlite = SqliteNamedStore::open(directory.path(), Profile::Durable).unwrap();
+    assert_eq!(blob.scan().unwrap(), sqlite.scan().unwrap());
+    assert_eq!(blob.scan().unwrap().count(), 50);
+    assert!(SqliteNamedStore::open(&directory.path().join("missing"), Profile::Fast).is_err());
+    assert_eq!(
+        sqlite_bench::record::Checksum::default(),
+        sqlite_bench::record::Checksum::new()
+    );
+}

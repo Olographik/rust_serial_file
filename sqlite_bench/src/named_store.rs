@@ -10,10 +10,7 @@ use anyhow::{Context, Result};
 use rusqlite::{Connection, params};
 use rust_serial_file::{
     adapter::{abstract_serial_read::SerialDataReader, abstract_serial_write::SerialDataWriter},
-    file::{
-        blob_file::{BlobFields, BlobRef},
-        struct_blob_file::StructBlobFile,
-    },
+    file::{blob_file::BlobRef, struct_blob_file::StructBlobFile},
     serialized_struct,
 };
 use serialized_struct_derive::SerializedStruct;
@@ -27,12 +24,6 @@ pub struct NamedRow {
     pub time: u64,
     /// The name, in the blob file.
     pub name: BlobRef,
-}
-
-impl BlobFields for NamedRow {
-    fn blob_refs_mut(&mut self, f: &mut dyn FnMut(&mut BlobRef)) {
-        f(&mut self.name);
-    }
 }
 
 /// Time of the record at `index`.
