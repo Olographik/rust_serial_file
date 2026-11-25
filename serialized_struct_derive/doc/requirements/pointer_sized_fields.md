@@ -2,7 +2,7 @@
 
 - **Date:** 2026-11-25
 - **Author:** `Olographik`
-- **Revision:** 0.1
+- **Revision:** 0.2
 - **Short description:** Make the derive macros encode and decode `usize` and `isize` struct fields as 64-bit little-endian values, so a derived struct has the same size and byte layout on `wasm32` and on 64-bit hosts.
 
 ## Table of contents
@@ -42,6 +42,7 @@ them back with a range check.
 
 | Revision | Date | Author | Changes |
 |---|---|---|---|
+| 0.2 | 2026-11-25 | Olographik | Planning reflection: panic in the raw decoder confirmed by the owner; clarified that `try_decode` is the path used by `StructFile`. No requirement changed. |
 
 ## Goals and scope
 
@@ -182,8 +183,11 @@ const SIZE: usize = <u64 as SerializedStruct>::SIZE + <u64 as SerializedStruct>:
   through `try_decode` on a crafted buffer with a value above `u32::MAX`
   under a 32-bit target, or by testing the generated conversion against
   `u32` in a unit test of the emitted pattern.
-- Decision to confirm: panic in the raw decoder (`PSF-SSD-DS-003`) instead of
-  saturating.
+- Confirmed by Olographik (2026-11-25): the raw decoder panics
+  (`PSF-SSD-DS-003`). `StructFile`, `FileAtlas` and the iterators decode with
+  `try_decode`, so they get an error, not a panic. This works only because the
+  derive overrides `try_decode` (`PSF-SSD-FR-006`): the default `try_decode`
+  checks the length and then calls the raw decoder, which would panic.
 
 **Implementation reflection (update as work progresses):**
 

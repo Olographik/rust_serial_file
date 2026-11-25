@@ -2,7 +2,7 @@
 
 - **Date:** 2026-11-25
 - **Author:** `Olographik`
-- **Revision:** 0.1
+- **Revision:** 0.2
 - **Short description:** Store variable-length byte values and strings in a companion blob file, referenced from fixed-width struct-file rows by `BlobRef { offset, len }`, with free-space reuse and an explicit compaction (defragmentation) function.
 
 ## Table of contents
@@ -55,6 +55,7 @@ Design decisions taken with the repository owner:
 
 | Revision | Date | Author | Changes |
 |---|---|---|---|
+| 0.2 | 2026-11-25 | Olographik | Planning reflection: `BlobRef` as offset + length and the error on a leftover `.compact` file confirmed by the owner; capacity rounding remains open. No requirement changed. |
 
 ## Goals and scope
 
@@ -267,9 +268,10 @@ leave a row pointing to garbage.
   `.compact` file plus keeping the old files until both are synced limits
   the damage, and recovery is left to the user as agreed. Adding an optional
   `BlobFile` to `FileLock` must not change the existing guard API.
-- Decisions to confirm: `BlobRef` = offset + length (12 bytes) instead of
-  start + end pointers (16 bytes); capacity rounding to 8 bytes; error (not
-  automatic recovery) on a leftover `.compact` file.
+- Confirmed by Olographik (2026-11-25): `BlobRef` = offset + length
+  (12 bytes) instead of start + end pointers; error (not automatic recovery)
+  on a leftover `.compact` file.
+- Still to confirm: capacity rounding to 8 bytes (`DYN-RSF-DS-004`).
 
 **Implementation reflection (update as work progresses):**
 
