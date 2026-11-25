@@ -1,0 +1,26 @@
+[package]
+name = "sqlite_bench"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Benchmarks comparing StructFile with SQLite on the same time-series workload."
+
+[dependencies]
+anyhow = "1.0.104"
+rust_serial_file = { path = "../rust_serial_file" }
+serialized_struct_derive = { path = "../serialized_struct_derive" }
+utils = { path = "../utils", default-features = false }
+tempfile = "3.23.0"
+rusqlite = { version = "0.43.0", features = ["bundled"] }
+serde_json = "1.0.154"
+
+[dev-dependencies]
+criterion = "0.8.2"
+
+[[bench]]
+name = "compare"
+harness = false
+
+[[bin]]
+name = "sqlite_bench_report"
+path = "src/bin/sqlite_bench_report.rs"
