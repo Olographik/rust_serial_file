@@ -135,13 +135,15 @@ fn derive_encode_raw_impl(input: &DeriveInput) -> TokenStream2 {
     }
 }
 
+/// Full `EncodeRaw` expansion: compile errors for pointer-sized fields, or
+/// the implementation.
+fn expand_encode_raw(input: &DeriveInput) -> TokenStream2 {
+    reject_pointer_sized_fields(input, "EncodeRaw").unwrap_or_else(|| derive_encode_raw_impl(input))
+}
+
 #[proc_macro_derive(EncodeRaw)]
 pub fn derive_encode_raw(input: TokenStream) -> TokenStream {
-    let input = parse_macro_input!(input as DeriveInput);
-    if let Some(errors) = reject_pointer_sized_fields(&input, "EncodeRaw") {
-        return errors.into();
-    }
-    derive_encode_raw_impl(&input).into()
+    expand_encode_raw(&parse_macro_input!(input as DeriveInput)).into()
 }
 
 fn derive_decode_field(field: (usize, &Field)) -> TokenStream2 {
@@ -191,13 +193,15 @@ fn derive_decode_raw_impl(input: &DeriveInput) -> TokenStream2 {
         },
     )
 }
+/// Full `DecodeRaw` expansion: compile errors for pointer-sized fields, or
+/// the implementation.
+fn expand_decode_raw(input: &DeriveInput) -> TokenStream2 {
+    reject_pointer_sized_fields(input, "DecodeRaw").unwrap_or_else(|| derive_decode_raw_impl(input))
+}
+
 #[proc_macro_derive(DecodeRaw)]
 pub fn derive_decode_raw(input: TokenStream) -> TokenStream {
-    let input = parse_macro_input!(input as DeriveInput);
-    if let Some(errors) = reject_pointer_sized_fields(&input, "DecodeRaw") {
-        return errors.into();
-    }
-    derive_decode_raw_impl(&input).into()
+    expand_decode_raw(&parse_macro_input!(input as DeriveInput)).into()
 }
 
 fn derive_serialized_field(field: (usize, &Field)) -> TokenStream2 {
@@ -230,16 +234,17 @@ fn derive_serialized_wrap(
         }
     }
 }
-#[proc_macro_derive(SerializedStruct)]
-pub fn derive_serialized_struct(input: TokenStream) -> TokenStream {
-    let input = parse_macro_input!(input as DeriveInput);
-    if let Some(errors) = reject_pointer_sized_fields(&input, "SerializedStruct") {
-        return errors.into();
+/// Full `SerializedStruct` expansion (also implementing `EncodeRaw` and
+/// `DecodeRaw`): compile errors for pointer-sized fields, or the
+/// implementations.
+fn expand_serialized_struct(input: &DeriveInput) -> TokenStream2 {
+    if let Some(errors) = reject_pointer_sized_fields(input, "SerializedStruct") {
+        return errors;
     }
     let name = &input.ident;
 
-    let encode_impl = derive_encode_raw_impl(&input);
-    let decode_impl = derive_decode_raw_impl(&input);
+    let encode_impl = derive_encode_raw_impl(input);
+    let decode_impl = derive_decode_raw_impl(input);
 
     let field_inits = match input.data {
         syn::Data::Struct(ref s) => match &s.fields {
@@ -248,18 +253,35 @@ pub fn derive_serialized_struct(input: TokenStream) -> TokenStream {
                 f.unnamed.iter().enumerate().map(derive_serialized_field)
             }
             syn::Fields::Unit => {
-                return derive_serialized_wrap(name, quote! {0}, &encode_impl, &decode_impl).into();
+                return derive_serialized_wrap(name, quote! {0}, &encode_impl, &decode_impl);
             }
         },
         _ => panic!("#[derive(EncodeRaw)] supports only structs"),
     };
 
-    derive_serialized_wrap(name, quote! {#(#field_inits)*}, &encode_impl, &decode_impl).into()
+    derive_serialized_wrap(name, quote! {#(#field_inits)*}, &encode_impl, &decode_impl)
+}
+
+#[proc_macro_derive(SerializedStruct)]
+pub fn derive_serialized_struct(input: TokenStream) -> TokenStream {
+    expand_serialized_struct(&parse_macro_input!(input as DeriveInput)).into()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{pointer_sized_name, reject_pointer_sized_fields};
+    use super::{
+        expand_decode_raw, expand_encode_raw, expand_serialized_struct, pointer_sized_name,
+        reject_pointer_sized_fields,
+    };
+
+    fn parse(input: &str) -> syn::DeriveInput {
+        syn::parse_str(input).unwrap()
+    }
+
+    /// Token strings have spaces between tokens; remove them to compare.
+    fn compact(tokens: proc_macro2::TokenStream) -> String {
+        tokens.to_string().replace(' ', "")
+    }
 
     fn name_of(ty: &str) -> Option<&'static str> {
         pointer_sized_name(&syn::parse_str(ty).unwrap())
@@ -272,6 +294,13 @@ mod tests {
         assert_eq!(name_of("core::primitive::usize"), Some("usize"));
         assert_eq!(name_of("::std::primitive::isize"), Some("isize"));
         assert_eq!(name_of("(usize)"), Some("usize"));
+        // Types coming from `macro_rules!` expansions can be wrapped in an
+        // invisible group.
+        let grouped = syn::Type::Group(syn::TypeGroup {
+            group_token: Default::default(),
+            elem: Box::new(syn::parse_str("isize").unwrap()),
+        });
+        assert_eq!(pointer_sized_name(&grouped), Some("isize"));
 
         assert_eq!(name_of("u64"), None);
         assert_eq!(name_of("i32"), None);
@@ -306,5 +335,68 @@ mod tests {
             let input: syn::DeriveInput = syn::parse_str(accepted).unwrap();
             assert!(reject_pointer_sized_fields(&input, "DecodeRaw").is_none());
         }
+    }
+
+    #[test]
+    fn expands_named_tuple_and_unit_structs() {
+        let named = compact(expand_serialized_struct(&parse(
+            "struct A { x: u8, y: u32 }",
+        )));
+        assert!(named.contains("implserialized_struct::EncodeRawforA"));
+        assert!(named.contains("offset+=self.x.encode(&mutdata[offset..]);"));
+        assert!(named
+            .contains("x:<u8asserialized_struct::DecodeRaw>::from_le_bytes_slices(bytes,offset)"));
+        assert!(named.contains(
+            "constSIZE:usize=<u8asserialized_struct::SerializedStruct>::SIZE+<u32asserialized_struct::SerializedStruct>::SIZE;"
+        ));
+
+        let tuple = compact(expand_serialized_struct(&parse("struct B(u16, i64);")));
+        assert!(tuple.contains("self.1.encode"));
+        assert!(tuple.contains("1:<i64asserialized_struct::DecodeRaw>"));
+
+        let unit = compact(expand_serialized_struct(&parse("struct C;")));
+        assert!(unit.contains("constSIZE:usize=0;"));
+        assert!(unit.contains("Self{}"));
+
+        let encode = compact(expand_encode_raw(&parse("struct D { a: f32 }")));
+        assert!(encode.contains("implserialized_struct::EncodeRawforD"));
+        assert!(!encode.contains("DecodeRaw"));
+        let unit_encode = compact(expand_encode_raw(&parse("struct E;")));
+        assert!(unit_encode.contains("->usize{0}"));
+
+        let decode = compact(expand_decode_raw(&parse("struct F(u8);")));
+        assert!(decode.contains("implserialized_struct::DecodeRawforF"));
+        assert!(!decode.contains("EncodeRaw"));
+    }
+
+    #[test]
+    fn expansions_report_pointer_sized_fields() {
+        for expanded in [
+            expand_serialized_struct(&parse("struct A { a: usize }")),
+            expand_encode_raw(&parse("struct A { a: usize }")),
+            expand_decode_raw(&parse("struct A { a: usize }")),
+        ] {
+            let text = compact(expanded);
+            assert!(text.contains("compile_error"));
+            assert!(!text.contains("implserialized_struct"));
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "supports only structs")]
+    fn serialized_struct_rejects_enums() {
+        expand_serialized_struct(&parse("enum A { X }"));
+    }
+
+    #[test]
+    #[should_panic(expected = "#[derive(EncodeRaw)] supports only structs")]
+    fn encode_raw_rejects_enums() {
+        expand_encode_raw(&parse("enum A { X }"));
+    }
+
+    #[test]
+    #[should_panic(expected = "#[derive(DecodeRaw)] supports only structs")]
+    fn decode_raw_rejects_unions() {
+        expand_decode_raw(&parse("union A { x: u8 }"));
     }
 }

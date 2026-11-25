@@ -2,12 +2,13 @@
 
 - **Date:** 2026-11-08
 - **Author:** `Olographik`
-- **Revision:** 0.2
+- **Revision:** 0.3
 - **Short description:** Expose raw little-endian `EncodeRaw` and `DecodeRaw` traits and provide opt-in checked encode/decode methods for fixed-layout serialized values.
 
 ## Table of contents
 
 - [Overview](#overview)
+- [Revisions](#revisions)
 - [Goals and scope](#goals-and-scope)
 - [Assumptions and dependencies](#assumptions-and-dependencies)
 - [Requirements](#requirements)
@@ -42,6 +43,16 @@ traits are also available as `serialized_struct::EncodeRaw` and
 refer to the old file. The module also contains
 `SerializedStruct`, which composes both traits and provides a fixed-size
 constant used by other serialization components.
+
+## Revisions
+
+This document predates the requirements template; this section was added in
+revision 0.3.
+
+| Revision | Date | Author | Changes |
+|---|---|---|---|
+| 0.2 | 2026-11-25 | Olographik | Moved to the `serialized_struct` crate (see `serialized_struct_crate.md`); test paths updated. No requirement changed. |
+| 0.3 | 2026-11-25 | Olographik | Modified `RSF-FR-006` (`usize`/`isize` removed from the primitive implementations) and `RSF-DS-004` (they shall not implement the traits). Compatibility and Out of scope updated. Tests T-002 and T-004 no longer cover `usize`/`isize`. |
 
 ## Goals and scope
 
@@ -92,7 +103,7 @@ constant used by other serialization components.
 | RSF-FR-003 | `EncodeRaw::encode` shall write the receiver's little-endian bytes at the beginning of the supplied buffer and return the number of bytes written. |
 | RSF-FR-004 | `DecodeRaw::from_le_bytes_slices` shall decode one value beginning at the caller-provided offset and advance the offset by the decoded value's byte width. |
 | RSF-FR-005 | `DecodeRaw::from_le_bytes_only` shall decode from offset zero and ignore trailing bytes beyond the decoded value. |
-| RSF-FR-006 | Primitive implementations shall cover the currently supported signed and unsigned integers, pointer-sized integers, and `f32`/`f64`: `u8`, `u16`, `u32`, `u64`, `u128`, `usize`, `i8`, `i16`, `i32`, `i64`, `i128`, `isize`, `f32`, and `f64`. |
+| RSF-FR-006 | Primitive implementations shall cover the fixed-width signed and unsigned integers and `f32`/`f64`: `u8`, `u16`, `u32`, `u64`, `u128`, `i8`, `i16`, `i32`, `i64`, `i128`, `f32`, and `f64`. *(Revision 0.3: `usize` and `isize` removed.)* |
 | RSF-FR-007 | The `SerializedStruct` trait shall remain public, extend both raw traits, and expose `SIZE` for existing fixed-layout serialization consumers. |
 | RSF-FR-008 | `SerializedStruct::try_encode` shall verify the destination has at least `SIZE` bytes before calling `encode`, returning `Ok(bytes_written)` on success and `Err` for an undersized destination. |
 | RSF-FR-009 | `SerializedStruct::try_decode` shall verify the source has at least `SIZE` bytes before decoding, returning the decoded value on success and `Err` for insufficient input. Trailing bytes shall be ignored, matching `from_le_bytes_only`. |
@@ -105,7 +116,7 @@ constant used by other serialization components.
 | RSF-DS-001 | Integer and floating-point representations shall use their standard Rust little-endian byte encodings with no added header or framing bytes. |
 | RSF-DS-002 | Sequential decoding shall consume bytes in field order by updating the shared offset after each successful field decode. |
 | RSF-DS-003 | Encoded width shall match the primitive type's `size_of::<T>()`; `SerializedStruct::SIZE` for primitive implementations shall match that width. |
-| RSF-DS-004 | `usize` and `isize` use the target architecture's width. Cross-architecture persistence of pointer-sized values is not guaranteed by this interface and shall not be implied. |
+| RSF-DS-004 | `usize` and `isize` shall not implement `EncodeRaw`, `DecodeRaw` or `SerializedStruct`, because their width depends on the target and the encoded layout must be platform independent. *(Revision 0.3: replaces "`usize` and `isize` use the target architecture's width".)* |
 
 ### Rust-specific requirements
 
@@ -214,8 +225,8 @@ let decoded = MyRecord::try_decode(&input)?;
 - Public exposure through the crate root shall not require downstream callers
   to depend on a private implementation module.
 - Pointer-sized integer encoding remains architecture-width-dependent.
-- A future checked decoding API or portable representation for `usize` and
-  `isize` requires a separately reviewed compatibility change.
+- `usize` and `isize` are not encodable (`RSF-DS-004`); records that need
+  them implement the traits by hand and choose the stored width.
 
 ## Performance and resource use
 
@@ -319,6 +330,6 @@ template's required labels: **✅ Success** or **❌ Failed**.
 - Changing derive macro parsing or generated implementations.
 - Adding support for unions, enums, strings, collections, or additional
   floating-point formats.
-- Defining a portable, architecture-independent representation for `usize`
-  and `isize`.
+- A built-in portable representation for `usize` and `isize`: rejected in
+  revision 0.3 in favor of a compile error.
 - Changing the on-disk format used by existing file consumers.
