@@ -1,8 +1,8 @@
 # File Metadata Requirements
 
-- **Date:** 2026-11-08
+- **Date:** 2026-11-25
 - **Author:** `Olographik`
-- **Revision:** 0.8
+- **Revision:** 0.9
 - **Short description:** Define a non-generic owned-file wrapper for metadata and unbuffered fixed-size row operations.
 
 ## Table of contents
@@ -43,6 +43,8 @@ It takes ownership of a `File`. Read operations use cursor-independent
 positioned reads and shared references, allowing concurrent readers. The
 wrapper does not provide synchronization; callers must coordinate writes and
 structural mutations exclusively.
+
+Since revision 0.9: `FileMetadata::sync_data` and `sync_all` (and the release of reserved rows they perform) are specified in [file_sync.md](file_sync.md).
 
 ## Goals and scope
 

@@ -1,8 +1,8 @@
 # StructFile Requirements
 
-- **Date:** 2026-11-11
+- **Date:** 2026-11-25
 - **Author:** `Olographik`
-- **Revision:** 0.4
+- **Revision:** 0.5
 - **Short description:** Specify a typed, file-backed serial collection that is generic over how it holds its `FileMetadata` (owned or borrowed), with read-only and writable views.
 
 ## Table of contents
@@ -61,6 +61,8 @@ The file metadata prefix remains opaque to `StructFile`; the component only
 interprets the row region. The caller chooses and manages metadata bytes when
 constructing the `FileMetadata`.
 
+Since revision 0.5: `StructFile::sync_data` and `sync_all` (writable collections only) are specified in [file_sync.md](file_sync.md).
+
 ## Revisions
 
 | Revision | Date | Author | Changes |
@@ -68,6 +70,7 @@ constructing the `FileMetadata`.
 | 0.2 | 2026-11-11 | `Olographik` | Public API: `read_value_at`, `serial_get`, and `serial_iter` take `&self` instead of `&mut self`, following revision 0.2 of `doc/requirements/data_container/serial_read_container.md`. No requirement IDs changed. The rest of this document still follows the previous template. |
 | 0.3 | 2026-11-11 | `Olographik` | `StructFile` becomes generic over its storage `M` instead of owning a `FileMetadata`. Modified: `RSF-SF-FR-001` (generic storage), `RSF-SF-FR-003` (path constructor only for owned storage), `RSF-SF-FR-005` (reader requires `M: Borrow<FileMetadata>`), `RSF-SF-FR-006` and `RSF-SF-FR-007` (writer and container require `M: BorrowMut<FileMetadata>`), `RSF-SF-FR-011` (`into_inner` recovers the storage), `RSF-SF-RS-001` (generic type, no `Clone`), `RSF-SF-RS-002` (iterator borrows the view). Added: `RSF-SF-FR-014` (read-only view alias), `RSF-SF-FR-015` (writable view alias), `RSF-SF-FR-016` (`as_read_only`), `RSF-SF-DS-010` (length recomputed per view), `RSF-SF-RS-007` (storage bounds, no lock dependency), `RSF-SF-RS-008` (default storage parameter), `RSF-SF-RS-009` (`Send`/`Sync` follow `T` and `M`), `RSF-SF-RS-010` (consistent `borrow`). Document migrated to the current requirements template: Revision column, closing Coverage and Documentation phases, split test tables, and the coverage results table. Tests T-026 to T-031 added. |
 | 0.4 | 2026-11-11 | `Olographik` | Modified: `RSF-SF-RS-007` (lock guards can be held directly as storage, not only reborrowed). No behavior or code changed. `FileLock` revision 0.5 added `Borrow`/`BorrowMut<FileMetadata>` impls to its guards, so a view can now hold a guard directly. Updated Overview, Assumptions, the lock usage example, Safety, Compatibility, and Out of scope (the guard `Borrow` item is resolved). The `StructFile` type doc comment in `src/file/struct_file.rs` was reworded to match; no code changed. |
+| 0.5 | 2026-11-25 | `Olographik` | Documentation only; no requirement changed. Overview points to `file_sync.md`, which specifies the new sync methods of this component. |
 
 ## Goals and scope
 

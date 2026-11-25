@@ -2,7 +2,7 @@
 
 - **Date:** 2026-11-25
 - **Author:** `Olographik`
-- **Revision:** 0.1
+- **Revision:** 0.2
 - **Short description:** Add explicit durability points (`sync_data` / `sync_all`) to `FileMetadata`, `BufferedWriter`, `StructFile`, `FileLock` and `FileAtlas`, so callers can persist written rows without closing the file.
 
 ## Table of contents
@@ -48,6 +48,7 @@ same logical row count.
 
 | Revision | Date | Author | Changes |
 |---|---|---|---|
+| 0.2 | 2026-11-25 | Olographik | Implemented (P-001 to P-005). Modified `SYN-RSF-FR-003` (the reservation is released only while the file still ends at this handle's reservation) and `SYN-RSF-FR-007` (atlas syncs use `sync_data`; failures are reported as `FileAtlasSyncError<K>`, which needs `K: Clone + Debug + Send + Sync + 'static`). Added test T-011. Public API, decisions, checklist, test results, notes, coverage and reflection updated; related documents point to this one. |
 
 ## Goals and scope
 
@@ -84,11 +85,11 @@ same logical row count.
 |---|---|---|
 | `SYN-RSF-FR-001` | `FileMetadata` shall provide `sync_data(&mut self) -> Result<()>`, which makes the file content and length durable (`File::sync_data`). | 0.1 |
 | `SYN-RSF-FR-002` | `FileMetadata` shall provide `sync_all(&mut self) -> Result<()>`, which also makes file metadata (timestamps, permissions) durable (`File::sync_all`). | 0.1 |
-| `SYN-RSF-FR-003` | Before syncing, `FileMetadata` shall release reserved rows beyond the logical row count (truncate the file to `data_offset + element_count * element_size`), so the synced file reopens with the same row count. | 0.1 |
+| `SYN-RSF-FR-003` | Before syncing, `FileMetadata` shall release reserved rows beyond the logical row count (truncate the file to `data_offset + element_count * element_size`), so the synced file reopens with the same row count. It shall do so only when the file still ends at this handle's reservation; if another handle changed the file length, nothing is truncated. | 0.2 |
 | `SYN-RSF-FR-004` | `BufferedWriter` shall provide `sync_data` and `sync_all`, which first `flush` pending rows, then sync the borrowed `FileMetadata`. If the flush fails, the sync is not attempted and pending rows are kept. | 0.1 |
 | `SYN-RSF-FR-005` | `StructFile<T, M>` shall provide `sync_data` and `sync_all` for `M: BorrowMut<FileMetadata>`; read-only views (`StructReadOnlyFile`) shall not offer them. | 0.1 |
 | `SYN-RSF-FR-006` | `FileLock` shall provide `sync_data` and `sync_all`, which take the write lock for the duration of the sync, and report a poisoned lock as an error, like `write`. | 0.1 |
-| `SYN-RSF-FR-007` | `FileAtlas` shall provide `sync(key)` for one file and `sync_all_files()` for every file it owns. `sync_all_files` shall try every file even after a failure and return an error listing every key that failed. | 0.1 |
+| `SYN-RSF-FR-007` | `FileAtlas` shall provide `sync(key)` for one file and `sync_all_files()` for every file it owns, both with `FileLock::sync_data`. `sync_all_files` shall try every file even after a failure and return a `FileAtlasSyncError<K>` listing every key that failed with its error. | 0.2 |
 | `SYN-RSF-FR-008` | Calling sync with nothing written since the last sync shall succeed and leave the file unchanged. | 0.1 |
 
 ### Data and serialization
@@ -131,9 +132,16 @@ impl FileLock {
     pub fn sync_all(&self) -> Result<()>;
 }
 
-impl<K> FileAtlas<K> {
-    pub fn sync<Q>(&self, key: &Q) -> Result<()>;
-    pub fn sync_all_files(&self) -> Result<()>;
+impl<K: Hash + Eq> FileAtlas<K> {
+    pub fn sync<Q>(&self, key: &Q) -> Result<()>;           // FileLock::sync_data
+    pub fn sync_all_files(&self) -> Result<()>              // every file, sync_data
+    where
+        K: Clone + fmt::Debug + Send + Sync + 'static;
+}
+
+/// Returned inside anyhow::Error by sync_all_files; downcast to read it.
+pub struct FileAtlasSyncError<K> {
+    pub failures: Vec<(K, anyhow::Error)>,
 }
 ```
 
@@ -189,11 +197,11 @@ Typical use: write a batch, then `file.sync_data()?` as a commit point.
 
 ### Current implementation checklist
 
-- [ ] P-001 — `FileMetadata sync` — Not started
-- [ ] P-002 — `BufferedWriter and StructFile sync` — Not started
-- [ ] P-003 — `FileLock and FileAtlas sync` — Not started
-- [ ] P-004 — `Coverage of touched files` — Not started
-- [ ] P-005 — `Documentation update` — Not started
+- [x] P-001 — `FileMetadata sync` — Done
+- [x] P-002 — `BufferedWriter and StructFile sync` — Done
+- [x] P-003 — `FileLock and FileAtlas sync` — Done
+- [x] P-004 — `Coverage of touched files` — Done
+- [x] P-005 — `Documentation update` — Done
 
 **Planning reflection (complete before implementation):**
 
@@ -202,12 +210,28 @@ Typical use: write a batch, then `file.sync_data()?` as a commit point.
 - Risk: a real crash cannot be simulated in tests; tests check what can be
   observed (return values, trimmed length, reopen count). Durability itself
   relies on the OS contract.
-- Decisions to confirm: trimming the reservation on sync (`SYN-RSF-FR-003`);
-  no automatic sync policy in this version (see Out of scope).
+- Confirmed with the approval of the document (2026-11-25): trimming the
+  reservation on sync (`SYN-RSF-FR-003`); no automatic sync policy in this
+  version (see Out of scope).
 
 **Implementation reflection (update as work progresses):**
 
-- None yet.
+- Implemented on 2026-11-25; no phase added or reordered.
+- `SYN-RSF-FR-003` was narrowed: `element_count` falls back to the file
+  length when the file was changed through another handle, and in that case
+  this handle no longer owns a reservation. Truncating then could cut rows
+  written by the other handle, so the sync leaves the length alone (T-011).
+- T-003 also shows the bug this fixes: before the sync, a reopen counts the
+  100 reserved zero rows as real rows.
+- `FileAtlasError` deliberately carries no key, but `SYN-RSF-FR-007` asks for
+  the failing keys, so `sync_all_files` returns a separate error type,
+  `FileAtlasSyncError<K>`, generic over the key. Its bounds are only on
+  `sync_all_files`, so atlases with other key types are unaffected.
+- `FileLock::sync_data` goes through a normal write guard, so `generation`
+  increases; this is correct, since the sync can change the file length.
+- The first version of T-005 assumed two non-contiguous rows stay cached;
+  they do not (a write outside the window flushes), so the test was changed
+  to contiguous rows. The code was not changed.
 
 ## Testing and acceptance criteria
 
@@ -225,6 +249,7 @@ Typical use: write a batch, then `file.sync_data()?` as a commit point.
 | T-008 | `SYN-RSF-FR-006` | `FileLock::sync_data` after writes; on a poisoned lock. | Success; poisoned lock returns an error. |
 | T-009 | `SYN-RSF-FR-007` | `FileAtlas::sync` on a known and an unknown key. | Known key succeeds; unknown key errors. |
 | T-010 | `SYN-RSF-FR-007`, `SYN-RSF-RS-003` | `sync_all_files` with one poisoned file among three. | The two healthy files are synced; the error names the poisoned key. |
+| T-011 | `SYN-RSF-FR-003` | Reserve rows, shorten the file through a second handle, then sync the first. | The sync succeeds and truncates nothing; the length set by the other handle is kept. |
 
 #### Test location
 
@@ -240,25 +265,34 @@ Typical use: write a batch, then `file.sync_data()?` as a commit point.
 | T-008 | `rust_serial_file/tests/file_lock.rs` | `lock_sync_and_poison` |
 | T-009 | `rust_serial_file/tests/file_atlas.rs` | `atlas_sync_one` |
 | T-010 | `rust_serial_file/tests/file_atlas.rs` | `atlas_sync_all_reports_failures` |
+| T-011 | `rust_serial_file/tests/file_metadata.rs` | `sync_keeps_file_changed_by_another_handle` |
 
 #### Test results
 
 | Test ID | Date of run | Git hash | Status |
 |---|---|---|---|
-| T-001 | — | — | ⏳ Not run |
-| T-002 | — | — | ⏳ Not run |
-| T-003 | — | — | ⏳ Not run |
-| T-004 | — | — | ⏳ Not run |
-| T-005 | — | — | ⏳ Not run |
-| T-006 | — | — | ⏳ Not run |
-| T-007 | — | — | ⏳ Not run |
-| T-008 | — | — | ⏳ Not run |
-| T-009 | — | — | ⏳ Not run |
-| T-010 | — | — | ⏳ Not run |
+| T-001 | 2026-11-25 | `4b898c1` | ✅ Success |
+| T-002 | 2026-11-25 | `4b898c1` | ✅ Success |
+| T-003 | 2026-11-25 | `4b898c1` | ✅ Success |
+| T-004 | 2026-11-25 | `4b898c1` | ✅ Success |
+| T-005 | 2026-11-25 | `4b898c1` | ✅ Success |
+| T-006 | 2026-11-25 | `4b898c1` | ✅ Success |
+| T-007 | 2026-11-25 | `4b898c1` | ✅ Success |
+| T-008 | 2026-11-25 | `4b898c1` | ✅ Success |
+| T-009 | 2026-11-25 | `4b898c1` | ✅ Success |
+| T-010 | 2026-11-25 | `4b898c1` | ✅ Success |
+| T-011 | 2026-11-25 | `4b898c1` | ✅ Success |
 
 #### Notes
 
-- None.
+- Command: `cargo test` in `rust_serial_file/` (214 tests, including doc
+  tests, pass; 12 are new); `rust_python_file` `cargo test` (7) still passes.
+  `cargo fmt --check` and `cargo clippy --all-targets` are clean.
+- T-007: the compile-fail doc test is on `StructFile::sync_data` in
+  `src/file/struct_file.rs`.
+- No test can show durability itself (that would need a power cut); the
+  tests check what is observable: return values, file length and bytes seen
+  through another handle, and the row count after a reopen.
 
 #### Warning notes
 
@@ -273,26 +307,61 @@ Typical use: write a batch, then `file.sync_data()?` as a commit point.
 
 ## Code coverage
 
-- **Coverage summary:** Not run yet.
+- **Coverage summary:** every new function is covered; the remaining gaps in the new code are error paths that cannot be triggered portably. The other gaps are in code this work did not change (see notes).
 
 ### Current coverage results
 
-- **Tool and command:** `cargo llvm-cov --all-targets --summary-only` (planned)
-- **Date of run:** —
-- **Git hash:** —
+- **Tool and command:** `cargo llvm-cov --all-targets --summary-only` (cargo-llvm-cov 0.9.2) in `rust_serial_file/`
+- **Date of run:** 2026-11-25
+- **Git hash:** `4b898c1`
 
 | File name | Function coverage | Line coverage | Region coverage | Branch coverage |
 |---|---|---|---|---|
-| `rust_serial_file/src/file/buffered_writer.rs` | — | — | — | — |
-| `rust_serial_file/src/file/file_atlas.rs` | — | — | — | — |
-| `rust_serial_file/src/file/file_lock.rs` | — | — | — | — |
-| `rust_serial_file/src/file/file_metadata.rs` | — | — | — | — |
-| `rust_serial_file/src/file/struct_file.rs` | — | — | — | — |
+| `rust_serial_file/src/file/buffered_writer.rs` | 100.00% (14/14) | 100.00% (145/145) | 92.37% (218/236) | N/A |
+| `rust_serial_file/src/file/file_atlas.rs` | 91.18% (31/34) | 97.30% (216/222) | 89.77% (237/264) | N/A |
+| `rust_serial_file/src/file/file_lock.rs` | 100.00% (23/23) | 100.00% (115/115) | 98.17% (161/164) | N/A |
+| `rust_serial_file/src/file/file_metadata.rs` | 93.02% (40/43) | 95.10% (388/408) | 84.93% (665/783) | N/A |
+| `rust_serial_file/src/file/struct_file.rs` | 100.00% (34/34) | 95.53% (235/246) | 84.55% (372/440) | N/A |
 
 ### Coverage notes
 
-- Not run yet. Expected gap: the error branch of `File::sync_data` itself
-  cannot be triggered portably in a test.
+Branch coverage is `N/A` for every file (needs a nightly toolchain). In the
+new sync code, the only missed regions are in `file_metadata.rs` and
+`file_atlas.rs`: `?` error paths of `set_len` failing while releasing a
+reservation, the file length being unreadable, a `row_end` overflow that
+cannot happen once the reservation itself succeeded, and the formatter
+failing in `FileAtlasSyncError`'s `Display`. (`File::sync_data`/`sync_all`
+failing returns directly, without a separate region.) None can be triggered portably from a
+test (a reservation needs a writable handle, and `fsync` does not fail on a
+healthy file system). The other gaps below predate this work and are listed
+so the table can be read; no plan to cover them as part of it.
+
+- **`rust_serial_file/src/file/buffered_writer.rs`:** all lines covered, and
+  the new `sync_data`/`sync_all` have no missed region (their flush error is
+  T-006). The 18 missed regions are older `?` error paths: constructor
+  conversions and allocation (lines 23-53), block and window overflow checks
+  (lines 95-146, 190-193) and the flush calls of the write paths (108, 132,
+  200).
+- **`rust_serial_file/src/file/file_atlas.rs`:** line 109, the `?` after
+  `write!` in `FileAtlasSyncError`'s `Display` (only runs if the formatter
+  fails); lines 196-197, the OS lock returning an error other than
+  `WouldBlock` (older code). The 3 missed functions are closures of that
+  error path and of generic instantiations not used by the tests.
+- **`rust_serial_file/src/file/file_lock.rs`:** all lines covered, and the
+  new `sync_data`/`sync_all` have no missed region (the poisoned-lock error is
+  T-008). The 3 missed regions are older: the `?` in `FileSnapshot::capture`
+  (lines 60-61) and in `FileWriteGuard::new` (line 324), which only fail if
+  the file length cannot be read.
+- **`rust_serial_file/src/file/file_metadata.rs`:** new code: the error
+  regions described above (lines 302, 315, 328, 331, 334). Older code: line
+  263 (`insert_row` offset overflow), lines 491-492 and 499-500 (`FileRows`
+  allocation failure and end of rows), lines 535-550 (`read_exact_at`
+  short-read, overflow and interrupted-read paths).
+- **`rust_serial_file/src/file/struct_file.rs`:** the new `sync_data` and
+  `sync_all` have no missed region. Line 417 (a row index not fitting in
+  `u64`, impossible on 64-bit targets) and the other missed regions are older
+  `?` error paths (conversions, allocations, overflow checks and I/O errors
+  of the existing read and write methods).
 
 ## Out of scope
 

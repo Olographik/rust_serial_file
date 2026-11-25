@@ -1,8 +1,8 @@
 # Buffered Writer Requirements
 
-- **Date:** 2026-11-08
+- **Date:** 2026-11-25
 - **Author:** `Olographik`
-- **Revision:** 0.1
+- **Revision:** 0.2
 - **Short description:** Define a buffered, write-only row writer that borrows `FileMetadata` and batches fixed-size row writes.
 
 ## Table of contents
@@ -45,6 +45,8 @@ not promise durable storage equivalent to `File::sync_data`. A flush called
 explicitly reports errors. `Drop` attempts to flush, but Rust does not allow
 `Drop` to return an error, so callers requiring observable persistence must
 call `flush` before dropping the writer.
+
+Since revision 0.2: `BufferedWriter::sync_data` and `sync_all` (flush, then sync) are specified in [file_sync.md](file_sync.md); a flush alone is still not a durability point (`RSF-BW-DS-008`).
 
 ## Goals and scope
 
