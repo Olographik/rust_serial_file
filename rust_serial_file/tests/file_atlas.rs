@@ -792,3 +792,395 @@ fn atlas_sync_all_reports_failures() {
     // An empty atlas has nothing to sync.
     assert!(FileAtlas::<String>::new().sync_all_files().is_ok());
 }
+
+mod with_blob {
+    use std::{
+        fs,
+        path::PathBuf,
+        sync::{Arc, Barrier},
+        thread,
+    };
+
+    use rust_serial_file::{
+        adapter::{
+            abstract_serial_read::SerialDataReader, abstract_serial_write::SerialDataWriter,
+        },
+        file::{
+            blob_file::{BlobFields, BlobFile, BlobRef, compact_path},
+            file_atlas::{FileAtlas, FileAtlasError},
+            file_lock::FileLock,
+            file_metadata::FileMetadata,
+        },
+        serialized_struct,
+    };
+    use serialized_struct_derive::SerializedStruct;
+    use tempfile::{TempDir, tempdir};
+
+    use super::{atlas_error, can_lock};
+
+    #[derive(SerializedStruct, Debug, Clone, Copy, PartialEq)]
+    struct Named {
+        id: u32,
+        name: BlobRef,
+    }
+
+    impl BlobFields for Named {
+        fn blob_refs_mut(&mut self, f: &mut dyn FnMut(&mut BlobRef)) {
+            f(&mut self.name);
+        }
+    }
+
+    fn paths(directory: &TempDir) -> (PathBuf, PathBuf) {
+        (
+            directory.path().join("named.bin"),
+            directory.path().join("named.blob"),
+        )
+    }
+
+    fn open(directory: &TempDir) -> FileAtlas<String> {
+        let atlas = FileAtlas::new();
+        let (rows, blob) = paths(directory);
+        atlas
+            .open_struct_with_blob::<Named>("named".to_owned(), rows, blob, 0)
+            .unwrap();
+        atlas
+    }
+
+    fn push(atlas: &FileAtlas<String>, id: u32, name: &str) {
+        atlas
+            .with_struct_blob_write::<Named, _, _>("named", |rows, blob| {
+                let name = blob.write_str(name)?;
+                rows.serial_write(Named { id, name })
+            })
+            .unwrap();
+    }
+
+    fn names(atlas: &FileAtlas<String>) -> Vec<(u32, String)> {
+        atlas
+            .with_struct_blob_read::<Named, _, _>("named", |rows, blob| {
+                rows.serial_iter()?
+                    .map(|row| {
+                        let row = row?;
+                        Ok((row.id, blob.read_string(row.name)?))
+                    })
+                    .collect()
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn atlas_struct_with_blob() {
+        let directory = tempdir().unwrap();
+        let atlas = Arc::new(open(&directory));
+        let (rows_path, blob_path) = paths(&directory);
+        assert!(!can_lock(&rows_path));
+        assert!(!can_lock(&blob_path));
+
+        // Writers on several threads, each holding the write guard for its
+        // whole write: rows and values always stay paired.
+        const THREADS: u32 = 4;
+        let barrier = Arc::new(Barrier::new(THREADS as usize));
+        let handles: Vec<_> = (0..THREADS)
+            .map(|thread_id| {
+                let atlas = Arc::clone(&atlas);
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    barrier.wait();
+                    for index in 0..25 {
+                        let id = thread_id * 100 + index;
+                        push(&atlas, id, &format!("name-{id}"));
+                    }
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        let all = names(&atlas);
+        assert_eq!(all.len(), 100);
+        for (id, name) in &all {
+            assert_eq!(name, &format!("name-{id}"));
+        }
+
+        // Opening the same paths again fails: the files are locked.
+        let other = FileAtlas::<String>::new();
+        assert_eq!(
+            atlas_error(other.open_struct_with_blob::<Named>(
+                "again".to_owned(),
+                &rows_path,
+                directory.path().join("other.blob"),
+                0
+            )),
+            FileAtlasError::FileLocked
+        );
+        assert_eq!(
+            atlas_error(other.open_struct_with_blob::<Named>(
+                "again".to_owned(),
+                directory.path().join("other.bin"),
+                &blob_path,
+                0
+            )),
+            FileAtlasError::FileLocked
+        );
+        // Nothing was inserted, and the first file of a failed pair is closed.
+        assert!(other.is_empty());
+        assert!(can_lock(&directory.path().join("other.bin")));
+        assert_eq!(
+            atlas_error(atlas.open_struct_with_blob::<Named>(
+                "named".to_owned(),
+                directory.path().join("x.bin"),
+                directory.path().join("x.blob"),
+                0
+            )),
+            FileAtlasError::KeyAlreadyPresent
+        );
+
+        // The pair is released when the entry is removed and closed.
+        drop(other);
+        let atlas = Arc::into_inner(atlas).unwrap();
+        let lock = atlas.remove("named").unwrap();
+        let (metadata, blob) = lock.into_parts().unwrap();
+        assert!(blob.is_some());
+        assert_eq!(metadata.path(), Some(rows_path.as_path()));
+        drop((metadata, blob));
+        assert!(can_lock(&rows_path));
+        assert!(can_lock(&blob_path));
+    }
+
+    #[test]
+    fn atlas_compact_blob() {
+        let directory = tempdir().unwrap();
+        let atlas = Arc::new(open(&directory));
+        for id in 0..10 {
+            push(&atlas, id, "short");
+        }
+        // Move every other value so the blob file has holes.
+        atlas
+            .with_struct_blob_write::<Named, _, _>("named", |rows, blob| {
+                for index in (0..10).step_by(2) {
+                    let mut row = rows.serial_get(index)?;
+                    row.name = blob.update(row.name, b"a much longer name than before")?;
+                    rows.serial_write_at(index, row)?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        let expected = names(&atlas);
+        let before = atlas
+            .with_struct_blob_read::<Named, _, _>("named", |_, blob| Ok(blob.stats()))
+            .unwrap();
+        assert!(before.free_blocks > 0);
+
+        // A reader starts while the write guard is held, then races with the
+        // compaction: it must see the state before or after, never between.
+        let handle = atlas.get("named").unwrap();
+        let guard = handle.write().unwrap();
+        let reader = {
+            let atlas = Arc::clone(&atlas);
+            thread::spawn(move || {
+                atlas
+                    .with_struct_blob_read::<Named, _, _>("named", |_, blob| Ok(blob.stats()))
+                    .unwrap()
+            })
+        };
+        drop(guard);
+        let stats = atlas.compact_blob::<Named, _>("named").unwrap();
+        let seen = reader.join().unwrap();
+        // The reader ran entirely before or entirely after the compaction.
+        assert!(seen == before || seen == stats, "{seen:?}");
+        assert_eq!(stats.free_blocks, 0);
+        assert!(stats.file_len < before.file_len);
+        assert_eq!(names(&atlas), expected);
+
+        // The new files are OS-locked, and no .compact file is left.
+        let (rows_path, blob_path) = paths(&directory);
+        assert!(!can_lock(&rows_path));
+        assert!(!can_lock(&blob_path));
+        assert!(!compact_path(&rows_path).exists());
+        assert!(!compact_path(&blob_path).exists());
+
+        // Writes after compaction go to the new files.
+        push(&atlas, 10, "after");
+        atlas.sync("named").unwrap();
+        drop(handle);
+        drop(atlas);
+        let reopened = open(&directory);
+        let mut expected = expected;
+        expected.push((10, "after".to_owned()));
+        assert_eq!(names(&reopened), expected);
+    }
+
+    #[test]
+    fn atlas_blob_errors() {
+        let directory = tempdir().unwrap();
+        let atlas = FileAtlas::<String>::new();
+        atlas
+            .open_struct::<Named>("plain".to_owned(), directory.path().join("plain.bin"), 0)
+            .unwrap();
+        // An entry without a blob file.
+        for error in [
+            atlas
+                .with_struct_blob_read::<Named, _, _>("plain", |_, _| Ok(()))
+                .unwrap_err(),
+            atlas
+                .with_struct_blob_write::<Named, _, _>("plain", |_, _| Ok(()))
+                .unwrap_err(),
+            atlas.compact_blob::<Named, _>("plain").unwrap_err(),
+        ] {
+            assert!(error.to_string().contains("no blob file"), "{error}");
+        }
+        assert_eq!(
+            atlas_error(atlas.compact_blob::<Named, _>("missing")),
+            FileAtlasError::KeyNotFound
+        );
+
+        for error in [
+            atlas
+                .with_struct_blob_read::<Named, _, _>("missing", |_, _| Ok(()))
+                .unwrap_err(),
+            atlas
+                .with_struct_blob_write::<Named, _, _>("missing", |_, _| Ok(()))
+                .unwrap_err(),
+        ] {
+            assert_eq!(
+                error.downcast_ref::<FileAtlasError>(),
+                Some(&FileAtlasError::KeyNotFound)
+            );
+        }
+
+        // A leftover .compact file of either path blocks opening.
+        let (rows_path, blob_path) = paths(&directory);
+        fs::write(compact_path(&rows_path), b"").unwrap();
+        let Err(error) =
+            atlas.open_struct_with_blob::<Named>("named".to_owned(), &rows_path, &blob_path, 0)
+        else {
+            panic!("opening must fail");
+        };
+        assert!(format!("{error:#}").contains("named.bin.compact"));
+        fs::remove_file(compact_path(&rows_path)).unwrap();
+        fs::write(compact_path(&blob_path), b"").unwrap();
+        let Err(error) =
+            atlas.open_struct_with_blob::<Named>("named".to_owned(), &rows_path, &blob_path, 0)
+        else {
+            panic!("opening must fail");
+        };
+        assert!(format!("{error:#}").contains("interrupted compaction"));
+        fs::remove_file(compact_path(&blob_path)).unwrap();
+
+        // An invalid blob file is reported and nothing is inserted.
+        fs::write(&blob_path, b"not a blob file at all").unwrap();
+        let Err(error) =
+            atlas.open_struct_with_blob::<Named>("named".to_owned(), &rows_path, &blob_path, 0)
+        else {
+            panic!("opening must fail");
+        };
+        assert!(format!("{error:#}").contains("bad magic"), "{error:#}");
+        assert!(!atlas.contains("named"));
+        assert!(can_lock(&rows_path));
+
+        // Compaction with the wrong record type is refused before any write.
+        fs::remove_file(&blob_path).unwrap();
+        atlas
+            .open_struct_with_blob::<Named>("named".to_owned(), &rows_path, &blob_path, 0)
+            .unwrap();
+        assert!(atlas.compact_blob::<WideNamed, _>("named").is_err());
+        assert!(!compact_path(&rows_path).exists());
+        assert!(
+            atlas
+                .with_struct_blob_read::<WideNamed, _, _>("named", |_, _| Ok(()))
+                .is_err()
+        );
+        assert!(
+            atlas
+                .with_struct_blob_write::<WideNamed, _, _>("named", |_, _| Ok(()))
+                .is_err()
+        );
+
+        // A path that cannot be opened (a directory).
+        let Err(error) = atlas.open_struct_with_blob::<Named>(
+            "dir".to_owned(),
+            directory.path(),
+            directory.path().join("dir.blob"),
+            0,
+        ) else {
+            panic!("opening a directory must fail");
+        };
+        assert!(format!("{error:#}").contains("failed to open or create"));
+
+        // A poisoned entry reports the poisoning everywhere.
+        let handle = atlas.get("named").unwrap();
+        let _ = thread::spawn(move || {
+            let _guard = handle.write().unwrap();
+            panic!("intentional panic while holding the write guard");
+        })
+        .join();
+        for error in [
+            atlas
+                .with_struct_blob_read::<Named, _, _>("named", |_, _| Ok(()))
+                .unwrap_err(),
+            atlas
+                .with_struct_blob_write::<Named, _, _>("named", |_, _| Ok(()))
+                .unwrap_err(),
+            atlas.compact_blob::<Named, _>("named").unwrap_err(),
+        ] {
+            assert!(error.to_string().contains("poisoned"), "{error}");
+        }
+
+        // A FileLock built by hand, without paths, cannot be compacted.
+        let metadata = FileMetadata::new(
+            fs::File::options()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(directory.path().join("manual.bin"))
+                .unwrap(),
+            Named::SIZE as u64,
+            0,
+        )
+        .unwrap();
+        let blob = BlobFile::new(
+            fs::File::options()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(directory.path().join("manual.blob"))
+                .unwrap(),
+        )
+        .unwrap();
+        let lock = FileLock::with_blob(metadata, blob);
+        {
+            let guard = lock.read().unwrap();
+            assert!(guard.blob().is_some());
+        }
+        {
+            let mut guard = lock.write().unwrap();
+            assert!(guard.blob().is_some());
+            let (metadata, blob) = guard.parts_mut();
+            assert!(metadata.path().is_none());
+            assert!(blob.unwrap().path().is_none());
+        }
+        assert!(
+            FileLock::new(lock.into_inner().unwrap())
+                .read()
+                .unwrap()
+                .blob()
+                .is_none()
+        );
+    }
+
+    #[derive(SerializedStruct)]
+    struct WideNamed {
+        id: u64,
+        name: BlobRef,
+    }
+
+    impl BlobFields for WideNamed {
+        fn blob_refs_mut(&mut self, f: &mut dyn FnMut(&mut BlobRef)) {
+            f(&mut self.name);
+        }
+    }
+
+    use serialized_struct::SerializedStruct as _;
+}

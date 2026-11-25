@@ -362,3 +362,27 @@ fn refuses_leftover_compaction_and_bad_sizes() {
     let value = blob.write(b"abc").unwrap();
     assert!(blob.read_into(value, &mut [0; 2]).is_err());
 }
+
+#[test]
+fn freeing_drops_every_free_block_at_the_end() {
+    // Two adjacent free blocks, as a crash between a free and its merge can
+    // leave them, followed by a live block.
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("adjacent.blob");
+    let mut bytes = file_header();
+    bytes.extend(header(false, 8));
+    bytes.extend([0; 8]);
+    bytes.extend(header(false, 8));
+    bytes.extend([0; 8]);
+    bytes.extend(header(true, 8));
+    bytes.extend(*b"live\0\0\0\0");
+    fs::write(&path, &bytes).unwrap();
+
+    let mut blob = BlobFile::open_or_create(&path).unwrap();
+    assert_eq!(blob.stats().free_blocks, 2);
+    // Freeing the live block merges it with the free block just before it,
+    // truncates the file there, and then drops the remaining free block.
+    blob.free(BlobRef::new(56, 4)).unwrap();
+    assert_eq!(blob.stats().file_len, 16);
+    assert_eq!(fs::read(&path).unwrap(), file_header());
+}

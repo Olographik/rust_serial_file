@@ -232,3 +232,50 @@ fn sync_and_reopen() {
         ]
     );
 }
+
+/// Replaces `path` by a non-empty directory while the file is open, so a
+/// rename over it fails. Unix only: an open file cannot be deleted on
+/// Windows.
+#[cfg(unix)]
+fn block_rename_over(path: &std::path::Path) {
+    fs::remove_file(path).unwrap();
+    fs::create_dir(path).unwrap();
+    fs::write(path.join("keep"), b"").unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn reports_a_failed_struct_file_rename() {
+    let directory = tempdir().unwrap();
+    let (rows_path, blob_path) = paths(&directory);
+    let mut file = open(&directory, 0);
+    push(&mut file, 1, "one", "");
+    block_rename_over(&rows_path);
+
+    let error = format!("{:#}", file.compact().unwrap_err());
+    assert!(error.contains("could not rename"), "{error}");
+    assert!(error.contains("delete both .compact files"), "{error}");
+    // As the message says: both .compact files are left, the blob file is
+    // the original one.
+    assert!(compact_path(&rows_path).exists());
+    assert!(compact_path(&blob_path).exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn reports_a_failed_blob_file_rename() {
+    let directory = tempdir().unwrap();
+    let (rows_path, blob_path) = paths(&directory);
+    let mut file = open(&directory, 0);
+    push(&mut file, 1, "one", "");
+    block_rename_over(&blob_path);
+
+    let error = format!("{:#}", file.compact().unwrap_err());
+    assert!(
+        error.contains("struct file is already compacted"),
+        "{error}"
+    );
+    // As the message says: only the blob .compact file is left.
+    assert!(!compact_path(&rows_path).exists());
+    assert!(compact_path(&blob_path).exists());
+}

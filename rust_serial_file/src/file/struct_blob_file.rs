@@ -331,3 +331,81 @@ fn create_new(path: &Path, lock: bool) -> Result<File> {
     }
     Ok(file)
 }
+
+#[cfg(test)]
+mod tests {
+    use std::fs::OpenOptions;
+
+    use crate::{
+        file::{
+            blob_file::{BlobFields, BlobFile, BlobRef},
+            file_metadata::FileMetadata,
+        },
+        serialized_struct::{DecodeRaw, EncodeRaw, SerializedStruct},
+    };
+
+    use super::compact_files;
+
+    struct Row(BlobRef);
+
+    impl EncodeRaw for Row {
+        fn encode(&self, data: &mut [u8]) -> usize {
+            self.0.encode(data)
+        }
+    }
+
+    impl DecodeRaw for Row {
+        fn from_le_bytes_slices(data: &[u8], offset: &mut usize) -> Self {
+            Self(BlobRef::from_le_bytes_slices(data, offset))
+        }
+    }
+
+    impl SerializedStruct for Row {
+        const SIZE: usize = BlobRef::SIZE;
+    }
+
+    impl BlobFields for Row {
+        fn blob_refs_mut(&mut self, f: &mut dyn FnMut(&mut BlobRef)) {
+            f(&mut self.0);
+        }
+    }
+
+    #[test]
+    fn compaction_needs_paths() {
+        let directory = tempfile::tempdir().unwrap();
+        let open = |name: &str| {
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(directory.path().join(name))
+                .unwrap()
+        };
+        // The test record round-trips like any record.
+        let mut row = Row(BlobRef::new(24, 3));
+        let mut bytes = [0; BlobRef::SIZE];
+        row.encode(&mut bytes);
+        row.blob_refs_mut(&mut |reference| reference.len = 4);
+        assert_eq!(Row::from_le_bytes_only(&bytes).0, BlobRef::new(24, 3));
+        assert_eq!(row.0.len, 4);
+
+        let mut metadata = FileMetadata::new(open("rows.bin"), Row::SIZE as u64, 0).unwrap();
+        let mut blob = BlobFile::new(open("rows.blob")).unwrap();
+
+        let error = compact_files::<Row>(&mut metadata, &mut blob, false).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("struct file was not opened from a path")
+        );
+
+        metadata.set_path(directory.path().join("rows.bin"));
+        let error = compact_files::<Row>(&mut metadata, &mut blob, false).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("blob file was not opened from a path")
+        );
+    }
+}
