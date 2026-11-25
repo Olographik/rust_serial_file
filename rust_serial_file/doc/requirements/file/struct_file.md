@@ -2,7 +2,7 @@
 
 - **Date:** 2026-11-25
 - **Author:** `Olographik`
-- **Revision:** 0.5
+- **Revision:** 0.6
 - **Short description:** Specify a typed, file-backed serial collection that is generic over how it holds its `FileMetadata` (owned or borrowed), with read-only and writable views.
 
 ## Table of contents
@@ -71,6 +71,7 @@ Since revision 0.5: `StructFile::sync_data` and `sync_all` (writable collections
 | 0.3 | 2026-11-11 | `Olographik` | `StructFile` becomes generic over its storage `M` instead of owning a `FileMetadata`. Modified: `RSF-SF-FR-001` (generic storage), `RSF-SF-FR-003` (path constructor only for owned storage), `RSF-SF-FR-005` (reader requires `M: Borrow<FileMetadata>`), `RSF-SF-FR-006` and `RSF-SF-FR-007` (writer and container require `M: BorrowMut<FileMetadata>`), `RSF-SF-FR-011` (`into_inner` recovers the storage), `RSF-SF-RS-001` (generic type, no `Clone`), `RSF-SF-RS-002` (iterator borrows the view). Added: `RSF-SF-FR-014` (read-only view alias), `RSF-SF-FR-015` (writable view alias), `RSF-SF-FR-016` (`as_read_only`), `RSF-SF-DS-010` (length recomputed per view), `RSF-SF-RS-007` (storage bounds, no lock dependency), `RSF-SF-RS-008` (default storage parameter), `RSF-SF-RS-009` (`Send`/`Sync` follow `T` and `M`), `RSF-SF-RS-010` (consistent `borrow`). Document migrated to the current requirements template: Revision column, closing Coverage and Documentation phases, split test tables, and the coverage results table. Tests T-026 to T-031 added. |
 | 0.4 | 2026-11-11 | `Olographik` | Modified: `RSF-SF-RS-007` (lock guards can be held directly as storage, not only reborrowed). No behavior or code changed. `FileLock` revision 0.5 added `Borrow`/`BorrowMut<FileMetadata>` impls to its guards, so a view can now hold a guard directly. Updated Overview, Assumptions, the lock usage example, Safety, Compatibility, and Out of scope (the guard `Borrow` item is resolved). The `StructFile` type doc comment in `src/file/struct_file.rs` was reworded to match; no code changed. |
 | 0.5 | 2026-11-25 | `Olographik` | Documentation only; no requirement changed. Overview points to `file_sync.md`, which specifies the new sync methods of this component. |
+| 0.6 | 2026-11-25 | `Olographik` | Proposal, before implementation: `write_multiple` takes the first row index instead of always starting at row zero (reported as a bug by the owner after the SQLite benchmark had to bypass it to append batches). Modified: `RSF-SF-FR-013` (start index, no gap allowed), `RSF-SF-DS-009` (order preserved from `start`). Added test T-032; T-017 redefined. Added phase P-010 (start index); Coverage and Documentation renumbered to P-011 and P-012 and set back to `Not started`. Updated Assumptions, Public API, Errors, Compatibility and acceptance criterion 5. |
 
 ## Goals and scope
 
@@ -129,7 +130,8 @@ Since revision 0.5: `StructFile::sync_data` and `sync_all` (writable collections
   `doc/requirements/data_container/serial_read_container.md`. Collection
   searches and `serial_auto_insert` require records to be sorted according to
   the applicable comparison, as defined by those traits.
-- `write_multiple` receives records in the order the caller wants stored.
+- `write_multiple` receives a start row and records in the order the caller
+  wants stored from that row.
   The caller is responsible for ordering them; `StructFile` neither sorts nor
   validates their ordering.
 - Dependencies: `anyhow` 1.0, the workspace `serialized_struct_derive` and
@@ -154,7 +156,7 @@ Since revision 0.5: `StructFile::sync_data` and `sync_all` (writable collections
 | `RSF-SF-FR-010` | Clear shall remove all logical rows while preserving the metadata prefix. Truncation shall retain the first requested number of rows and shall succeed without mutation when the requested length is at least the current length. | 0.1 |
 | `RSF-SF-FR-011` | The component shall expose immutable access to the `FileMetadata` (`file_metadata(&self) -> &FileMetadata`) and let the caller recover the storage by consuming the view (`into_inner(self) -> M`). For owned storage, `into_file_metadata(self) -> FileMetadata` shall remain available. It shall not expose mutable access to the metadata that can invalidate its cached collection length while the view exists. | 0.3 |
 | `RSF-SF-FR-012` | `serial_len` and `serial_is_empty` shall be available without fallible file I/O and reflect the count maintained by the `StructFile` instance. | 0.1 |
-| `RSF-SF-FR-013` | The component shall provide `write_multiple(&[T])` to write the supplied records in slice order starting at row zero, replacing existing rows and appending any suffix that exceeds the current row count; it shall not sort or validate input ordering. | 0.1 |
+| `RSF-SF-FR-013` | The component shall provide `write_multiple(start: usize, values: &[T])` to write the supplied records in slice order at rows `start..start + values.len()`, replacing the existing rows in that range and appending the rows beyond the current length. `start` may be at most the current length (a write at `start == len` is a batch append); a larger `start` would leave a gap and shall be an error with nothing written. Rows before `start`, and rows after the written range, are unchanged. It shall not sort or validate input ordering. | 0.6 |
 | `RSF-SF-FR-014` | The component shall provide the public alias `StructReadOnlyFile<'a, T> = StructFile<T, &'a FileMetadata>`. It implements `SerialDataReader<T>` only; calling a write operation on it shall be a compile-time error. Several read-only views of the same `FileMetadata` may exist at once. | 0.3 |
 | `RSF-SF-FR-015` | The component shall provide the public alias `StructWriteFile<'a, T> = StructFile<T, &'a mut FileMetadata>`. It implements `SerialDataReader<T>`, `SerialDataWriter<T>`, and `SerialDataContainer<T>`. After it is dropped, the borrowed `FileMetadata` reflects all its successful writes. | 0.3 |
 | `RSF-SF-FR-016` | Every view shall provide `as_read_only(&self) -> StructReadOnlyFile<'_, T>`. It shall be infallible, perform no file I/O, and copy the view's cached length. No equivalent writable reborrow shall be provided, because writes through a reborrow would leave the parent view's cached length stale. | 0.3 |
@@ -171,7 +173,7 @@ Since revision 0.5: `StructFile::sync_data` and `sync_all` (writable collections
 | `RSF-SF-DS-006` | Successful append, bulk write, insert, remove, clear, and truncate operations shall update the instance's logical length to match the resulting collection. Failed operations shall not report a successful length change. | 0.1 |
 | `RSF-SF-DS-007` | Record order shall be the physical row order. The component shall not automatically sort records except when a caller explicitly uses a sorted insertion operation from `SerialDataContainer`. | 0.1 |
 | `RSF-SF-DS-008` | Search and sorted-insertion behavior shall follow `SerialDataContainer` comparison semantics and shall propagate undefined ordering and read errors. | 0.1 |
-| `RSF-SF-DS-009` | `write_multiple` shall preserve the order of its input slice without sorting or validating its ordering. The caller is responsible for providing records in the desired order. It shall replace rows `[0, min(slice.len(), current_len))`, append any remaining records contiguously, and leave existing rows after the slice unchanged. An empty slice shall perform no writes. | 0.1 |
+| `RSF-SF-DS-009` | `write_multiple` shall store its input slice from row `start` in slice order, preserving that order without sorting or validating its ordering. The caller is responsible for providing records in the desired order. It shall replace rows `[0, min(slice.len(), current_len))`, append any remaining records contiguously, and leave existing rows after the slice unchanged. An empty slice shall perform no writes. | 0.6 |
 | `RSF-SF-DS-010` | Each construction through `new` shall read the length from the metadata again, so a view created after an earlier view was dropped sees every change that view made. Views over the same `FileMetadata` shall share the file format and never keep a separate copy of the rows. | 0.3 |
 
 ### Rust-specific requirements
@@ -215,7 +217,7 @@ impl<T: SerializedStruct, M: Borrow<FileMetadata>> StructFile<T, M> {
 
 impl<T: SerializedStruct, M: BorrowMut<FileMetadata>> StructFile<T, M> {
     pub fn write_value_at(&mut self, index: usize, value: &T) -> anyhow::Result<()>;
-    pub fn write_multiple(&mut self, values: &[T]) -> anyhow::Result<()>;
+    pub fn write_multiple(&mut self, start: usize, values: &[T]) -> anyhow::Result<()>;
 }
 
 impl<T: SerializedStruct> StructFile<T, FileMetadata> {
@@ -277,12 +279,21 @@ they shall not conflict with or weaken the trait behavior above. No method
 shall return `&mut FileMetadata` from a view, because external mutations
 would make the infallible trait length stale.
 
-`write_multiple` is a bulk replacement beginning at row zero, not an insert
-or unconditional append operation. It shall preserve slice order as supplied
-by the caller and shall not sort or check record ordering. When the slice is
-longer than the current collection, its existing-row prefix is replaced and
-the excess suffix is appended contiguously; when shorter, rows after the
-written prefix remain unchanged. An empty slice performs no writes.
+`write_multiple` is a bulk write beginning at row `start`, not an insert: it
+replaces the rows `start..start + values.len()` that exist and appends the
+rest contiguously. `start == serial_len()` appends a batch; `start == 0`
+gives the behavior before revision 0.6. It shall preserve slice order as
+supplied by the caller and shall not sort or check record ordering. Rows
+before `start` and after the written range remain unchanged. An empty slice
+performs no writes (for any `start` up to the length).
+
+```rust
+// Append records in batches of 1 000.
+for batch in records.chunks(1_000) {
+    let end = file.serial_len();
+    file.write_multiple(end, batch)?;
+}
+```
 
 ## Errors and failure behavior
 
@@ -295,8 +306,10 @@ written prefix remain unchanged. An empty slice performs no writes.
   allocation failures, and decoding failures.
 - Write operations shall report out-of-range indices, checked-conversion
   failures, allocation failures, encoding failures, and file I/O failures.
-- `write_multiple` shall check row-count and byte-length arithmetic and shall
-  report encoding, allocation, range-overflow, and file I/O failures. It shall
+- `write_multiple` shall return an error, writing nothing, when `start` is
+  greater than the current length. It shall check row-count and byte-length
+  arithmetic and shall report encoding, allocation, range-overflow, and file
+  I/O failures. It shall
   pass records to serialization in slice order without sorting or reordering.
 - If `try_encode` reports a byte count other than `T::SIZE`, the operation
   shall fail without writing that row.
@@ -355,6 +368,10 @@ written prefix remain unchanged. An empty slice performs no writes.
   and all trait methods keep their signatures for owned storage. Existing
   code using `StructFile<T>` shall compile unchanged. Code that names
   `StructFileIter<'a, T>` is unaffected.
+- **Breaking change (revision 0.6):** `write_multiple(values)` becomes
+  `write_multiple(start, values)`. Existing calls stop compiling, which
+  points every caller to the change; passing `0` keeps the old behavior. No
+  caller exists in this workspace outside the tests.
 - **Possible inference change:** `StructFile::new(metadata)` without a type
   annotation now has an extra type parameter. When `M` is inferred from the
   argument this is invisible; the existing tests (T-001 to T-025) shall
@@ -406,8 +423,10 @@ The number of project-specific phases is decided during this planning
 reflection. The last two phases are always Coverage then Documentation.
 Phases P-001 to P-005 were completed in revision 0.1 under the previous
 template, where P-005 was a project-specific coverage phase. P-006 records
-the revision 0.2 change. Revision 0.3 adds P-007 to P-009, so Coverage is
-`P-010` and Documentation is `P-011`.
+the revision 0.2 change. Revision 0.3 adds P-007 to P-009. Revision 0.6 adds
+P-010, so Coverage is `P-011` and Documentation is `P-012`; both were
+already done for revision 0.3 and are set back to `Not started`, since they
+must be redone after P-010.
 
 | Phase ID | Phase and implementation steps | Dependencies | Completion criteria |
 |---|---|---|---|
@@ -420,8 +439,9 @@ the revision 0.2 change. Revision 0.3 adds P-007 to P-009, so Coverage is
 | P-007 | **Generic storage:** add the `M = FileMetadata` parameter last; move `new`, `file_metadata`, `into_inner`, and `read_value_at` to an impl bounded by `M: Borrow<FileMetadata>`; move `write_value_at`, `write_multiple`, and the private `shift_rows_left` to `M: BorrowMut<FileMetadata>`; keep `open_or_create` and `into_file_metadata` on `StructFile<T, FileMetadata>`; bound the three trait impls as in the Public API. | P-006 | `cargo build --all-targets` succeeds; T-001 to T-025 compile without edits and pass; `struct_file.rs` names no lock type. |
 | P-008 | **Views:** add the `StructReadOnlyFile` and `StructWriteFile` aliases, `as_read_only`, and the doc comments required by `RSF-SF-RS-009` and `RSF-SF-RS-010`, including a `compile_fail` doc test showing that a read-only view cannot write. | P-007 | The aliases and `as_read_only` are public and documented; `cargo test --doc` runs the `compile_fail` example. |
 | P-009 | **View tests:** add T-026 to T-031. | P-008 | T-026 to T-031 are implemented and pass; `cargo fmt --check` and `cargo clippy --all-targets` report no warnings. |
-| P-010 | **Coverage:** run the tests with coverage for the touched files only and record the results in [Code coverage](#code-coverage). | P-001 to P-009 | Coverage is measured for every touched file, the results are recorded, and any uncovered code is justified. |
-| P-011 | **Documentation:** update this requirements document and the code comments of the touched files. | P-010 | The document matches the implemented behavior and test results; public items in the touched files have up-to-date doc comments. |
+| P-010 | **Start index (revision 0.6):** add the `start` parameter to `write_multiple`, reject `start > len` before writing, write the encoded block at `start`; update T-017 and the other callers, add T-032. | P-009 | T-017 and T-032 pass; all other tests pass; `cargo clippy --all-targets` reports no warnings. |
+| P-011 | **Coverage:** run the tests with coverage for the touched files only and record the results in [Code coverage](#code-coverage). | P-001 to P-010 | Coverage is measured for every touched file, the results are recorded, and any uncovered code is justified. |
+| P-012 | **Documentation:** update this requirements document and the code comments of the touched files. | P-011 | The document matches the implemented behavior and test results; public items in the touched files have up-to-date doc comments. |
 
 ### Current implementation checklist
 
@@ -434,8 +454,9 @@ the revision 0.2 change. Revision 0.3 adds P-007 to P-009, so Coverage is
 - [x] P-007 — `Generic storage` — Done
 - [x] P-008 — `Read-only and writable views` — Done
 - [x] P-009 — `View tests` — Done
-- [x] P-010 — `Coverage of touched files` — Done
-- [x] P-011 — `Documentation update` — Done
+- [ ] P-010 — `write_multiple start index` — Not started
+- [ ] P-011 — `Coverage of touched files` — Not started
+- [ ] P-012 — `Documentation update` — Not started
 
 **Planning reflection (complete before implementation):**
 
@@ -520,7 +541,7 @@ the revision 0.2 change. Revision 0.3 adds P-007 to P-009, so Coverage is
 | T-014 | `RSF-SF-FR-012`, `RSF-SF-RS-005` | Query length and emptiness before and after successful and failed operations. | Length queries require no file I/O and change only after successful mutations. |
 | T-015 | `RSF-SF-FR-011` | Access and recover the owned `FileMetadata`. | The immutable accessor does not permit mutation, and consuming recovery returns the metadata owner. |
 | T-016 | `RSF-SF-DS-001`, `RSF-SF-DS-005`, `RSF-SF-DS-007` | Reopen an existing typed file with a metadata prefix and verify all rows. | Prefix bytes and row order remain unchanged, and no additional file-format header is introduced. |
-| T-017 | `RSF-SF-FR-013`, `RSF-SF-DS-009` | Bulk-write a pre-ordered slice shorter than, equal to, and longer than the existing row count, including an empty slice. | The slice is written from row zero in its original order, excess values append contiguously, untouched trailing rows remain, and an empty slice does not mutate the file. |
+| T-017 | `RSF-SF-FR-013`, `RSF-SF-DS-009` | Bulk-write pre-ordered slices at `start = 0` shorter than, equal to, and longer than the existing rows; at a middle `start` overlapping the end; at `start == len` (append); and an empty slice. | Rows `start..` hold the slice in order, rows before `start` and after the written range are unchanged, the excess is appended, the length grows by the appended count only, and the empty slice changes nothing. |
 | T-018 | `RSF-SF-FR-006`, `RSF-SF-DS-006` | Make `try_encode` fail during append and bulk write. | Errors are returned, file bytes are unchanged, and the cached length does not increase. |
 | T-019 | `RSF-SF-FR-004`, `RSF-SF-FR-005`, `RSF-SF-FR-009` | Make `try_decode` fail during direct read, removal, and iteration. | Errors are returned, removal leaves the file-backed collection unchanged, and iteration terminates after its error. |
 | T-020 | `RSF-SF-FR-009` | Remove a row from a collection large enough to require multiple shift-buffer chunks. | Rows spanning chunk boundaries retain their order and the logical length decreases correctly. |
@@ -535,6 +556,7 @@ the revision 0.2 change. Revision 0.3 adds P-007 to P-009, so Coverage is
 | T-029 | `RSF-SF-FR-016` | Call `as_read_only` on an owned `StructFile` and on a `StructWriteFile`, then read through the returned views. | The read-only view returns the same length and records as its parent, and the call cannot fail. |
 | T-030 | `RSF-SF-FR-005`, `RSF-SF-FR-006`, `RSF-SF-RS-007` | Integration with `FileLock`: build a `StructWriteFile` from `&mut *lock.write()?`, write records, drop it, then build two `StructReadOnlyFile` views from two `read()` guards held at once. | Writes through the write guard are visible through both read guards; the test lives outside `struct_file.rs`, which names no lock type. |
 | T-031 | `RSF-SF-RS-009` | Compile-time assertions that `StructFile<Record>`, `StructReadOnlyFile<'_, Record>`, and `StructWriteFile<'_, Record>` are `Send` and `Sync`. | The assertions compile. |
+| T-032 | `RSF-SF-FR-013` | `write_multiple` with `start = len + 1` (also with an empty slice), and appending 10 batches with `start = serial_len()` compared with one write of all records. | The gap is rejected with the file and length unchanged; the batched file is byte-identical to the single write. |
 
 #### Test location
 
@@ -571,6 +593,7 @@ the revision 0.2 change. Revision 0.3 adds P-007 to P-009, so Coverage is
 | T-029 | `tests/struct_file.rs` | `as_read_only_copies_length_without_io` |
 | T-030 | `tests/struct_file.rs` | `views_work_through_file_lock_guards` |
 | T-031 | `tests/struct_file.rs` | `views_are_send_and_sync` |
+| T-032 | `tests/struct_file.rs` | `write_multiple_rejects_gaps_and_appends_batches` |
 
 #### Test results
 
@@ -592,7 +615,7 @@ the revision 0.2 change. Revision 0.3 adds P-007 to P-009, so Coverage is
 | T-014 | 2026-11-11 | `74e5e61+dirty` | ✅ Success |
 | T-015 | 2026-11-11 | `74e5e61+dirty` | ✅ Success |
 | T-016 | 2026-11-11 | `74e5e61+dirty` | ✅ Success |
-| T-017 | 2026-11-11 | `74e5e61+dirty` | ✅ Success |
+| T-017 | — | — | ⏳ Not run |
 | T-018 | 2026-11-11 | `74e5e61+dirty` | ✅ Success |
 | T-019 | 2026-11-11 | `74e5e61+dirty` | ✅ Success |
 | T-020 | 2026-11-11 | `74e5e61+dirty` | ✅ Success |
@@ -607,6 +630,7 @@ the revision 0.2 change. Revision 0.3 adds P-007 to P-009, so Coverage is
 | T-029 | 2026-11-11 | `74e5e61+dirty` | ✅ Success |
 | T-030 | 2026-11-11 | `74e5e61+dirty` | ✅ Success |
 | T-031 | 2026-11-11 | `74e5e61+dirty` | ✅ Success |
+| T-032 | — | — | ⏳ Not run |
 
 #### Notes
 
@@ -639,9 +663,10 @@ the revision 0.2 change. Revision 0.3 adds P-007 to P-009, so Coverage is
    views work through `FileLock` guards.
 4. Typed reads, writes, and iteration use the `SerializedStruct` fallible
    APIs and report malformed serialization and file errors.
-5. `write_multiple` writes records from row zero in caller-supplied order,
-   overwrites the existing prefix, and appends any excess suffix without
-   sorting or validating record ordering.
+5. `write_multiple` writes records from the given start row in
+   caller-supplied order, overwrites the existing rows of that range, appends
+   any excess, rejects a start beyond the length, and does not sort or
+   validate record ordering.
 6. Every view implements `SerialDataReader<T>`; writable views also
    implement `SerialDataWriter<T>` and `SerialDataContainer<T>`, with correct
    indexing, ordering, and length semantics.
