@@ -1,0 +1,5 @@
+error: #[derive(SerializedStruct)] does not support the `isize` field `1` of `Pair`: its size depends on the target platform. Use a fixed-width type (for example `u64` or `i64`), or implement `EncodeRaw`, `DecodeRaw` and `SerializedStruct` by hand for this struct.
+ --> tests/ui/isize_tuple_field.rs:4:18
+  |
+4 | struct Pair(u32, core::primitive::isize);
+  |                  ^^^^^^^^^^^^^^^^^^^^^^

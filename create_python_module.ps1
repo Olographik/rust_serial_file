@@ -13,7 +13,9 @@ if (-not (Test-Path 'python_module')) {
     New-Item -ItemType Directory -Path 'python_module' | Out-Null
 }
 
-cargo build --release
+# extension-module: the .pyd must not link libpython itself; the importing
+# interpreter provides it. `cargo test` builds without this feature.
+cargo build --release --features extension-module
 
 Get-ChildItem -Filter target/release/*.dll | ForEach-Object { 
     $in = "$_"

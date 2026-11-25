@@ -20,13 +20,51 @@
 //! Values are written little-endian, fields in declaration order, without
 //! padding. `SerializedStruct::SIZE` is the exact encoded size.
 //!
-//! # `usize` and `isize`
+//! # No `usize` or `isize`
 //!
-//! The implementations for `usize` and `isize` used directly (for example a
-//! `StructFile<usize>`) use the target's pointer width: 4 bytes on `wasm32`,
-//! 8 bytes on 64-bit hosts. Data written with them is not portable between
-//! such targets. Records exchanged between a browser and a host should use
-//! fixed-width types (`u64`, `i64`, ...).
+//! The encoded layout must be the same on every platform (for example a
+//! `wasm32` browser client and a 64-bit host). `usize` and `isize` change
+//! width with the target, so they do not implement these traits, and
+//! `#[derive(SerializedStruct)]` rejects fields of these types with a compile
+//! error. Use a fixed-width type (`u32`, `u64`, `i64`, ...), or implement
+//! [`EncodeRaw`], [`DecodeRaw`] and [`SerializedStruct`] by hand for the
+//! record and choose the stored width there.
+//!
+//! ```compile_fail
+//! use serialized_struct::SerializedStruct;
+//!
+//! fn size_of_record<T: SerializedStruct>() -> usize {
+//!     T::SIZE
+//! }
+//!
+//! size_of_record::<usize>(); // error: `usize` does not implement `SerializedStruct`
+//! ```
+//!
+//! ```compile_fail
+//! use serialized_struct::SerializedStruct;
+//!
+//! fn size_of_record<T: SerializedStruct>() -> usize {
+//!     T::SIZE
+//! }
+//!
+//! size_of_record::<isize>(); // error: `isize` does not implement `SerializedStruct`
+//! ```
+//!
+//! The derive recognizes `usize`/`isize` as written. A type alias is not
+//! recognized by name, but it still fails to compile, because the aliased
+//! type does not implement the traits:
+//!
+//! ```compile_fail
+//! use serialized_struct_derive::SerializedStruct;
+//! use serialized_struct::{DecodeRaw, EncodeRaw};
+//!
+//! type Index = usize;
+//!
+//! #[derive(SerializedStruct)]
+//! struct Row {
+//!     index: Index,
+//! }
+//! ```
 
 use std::mem::size_of;
 
@@ -139,8 +177,10 @@ macro_rules! impl_raw_serialized_struct {
     };
 }
 
-impl_raw_serialized_struct!(u8, u16, u32, u64, u128, usize);
-impl_raw_serialized_struct!(i8, i16, i32, i64, i128, isize);
+// `usize` and `isize` are deliberately not implemented: their width depends
+// on the target, which would make the encoded layout platform dependent.
+impl_raw_serialized_struct!(u8, u16, u32, u64, u128);
+impl_raw_serialized_struct!(i8, i16, i32, i64, i128);
 
 // impl_raw_serialized_struct!(f16);
 impl_raw_serialized_struct!(f32, f64);
